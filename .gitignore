@@ -1,0 +1,14 @@
+node_modules/
+data/
+downloads/
+backups/
+
+.env
+env.txt
+
+*.log
+*.db
+*.sqlite
+
+Thumbs.db
+.DS_Store

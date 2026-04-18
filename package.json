@@ -1,0 +1,22 @@
+{
+  "name": "wabot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test:webhook": "node test-server.js",
+    "stress": "node stress-test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.15.0",
+    "dotenv": "^17.4.1",
+    "express": "^5.2.1",
+    "fast-levenshtein": "^2.0.6",
+    "sqlite3": "^6.0.1"
+  }
+}
