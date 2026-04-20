@@ -141,12 +141,17 @@ function getDocumentFieldName(docKey) {
   return DOCUMENTS.FIELDS[docKey] || null;
 }
 
+function exactKeywordMatch(text, keywords) {
+  const clean = normalizeText(text);
+  return keywords.has(clean);
+}
+
 function isSkipCommand(text) {
-  return fuzzyMatch(text, KEYWORDS.SKIP, 2);
+  return exactKeywordMatch(text, KEYWORDS.SKIP);
 }
 
 function isDoneCommand(text) {
-  return fuzzyMatch(text, KEYWORDS.DONE, 2);
+  return exactKeywordMatch(text, KEYWORDS.DONE) || fuzzyMatch(text, KEYWORDS.DONE, 1);
 }
 
 function inferStage1Intent(text) {
@@ -189,6 +194,24 @@ function inferIncomeProofIssue(text) {
     "no tengo comprobante",
     "no manejo banco",
     "me pagan cash"
+  ];
+
+  return phrases.some((phrase) => clean.includes(phrase));
+}
+
+function inferMissingWorkPhone(text) {
+  const clean = normalizeText(text);
+  const phrases = [
+    "no tengo numero",
+    "no tengo número",
+    "no cuento con numero",
+    "no cuento con número",
+    "sin numero",
+    "sin número",
+    "no hay telefono",
+    "no hay teléfono",
+    "no tiene telefono",
+    "no tiene teléfono"
   ];
 
   return phrases.some((phrase) => clean.includes(phrase));
@@ -243,7 +266,7 @@ async function sendQuestionByIndex(to, index) {
     await sendTextMessage(to, question.preMessage);
   }
 
-  await sendTextMessage(to, question.question);
+  await sendTextMessage(to, `${question.question}\n\nSi desea omitir esta pregunta, escriba *omitir*.`);
 }
 
 async function remindCurrentStep(to, client) {
@@ -278,6 +301,9 @@ async function remindCurrentStep(to, client) {
       return;
     case "under_review":
       await sendTextMessage(to, MESSAGES.UNDER_REVIEW);
+      return;
+    case "contacted":
+      await sendTextMessage(to, MESSAGES.CONTACTED);
       return;
     case "closed":
       await sendTextMessage(to, MESSAGES.CLOSED);
@@ -406,6 +432,13 @@ async function sendStatusMessage(to, client) {
       statusMessage += `💡 Si necesita iniciar una nueva solicitud, escriba 'nueva solicitud'`;
       break;
 
+    case "contacted":
+      statusMessage += `📍 Asesor ya contactó al solicitante\n`;
+      statusMessage += `Estado: Seguimiento posterior al contacto\n`;
+      statusMessage += `Documentos: ${getDocumentProgress(client).completed}/5 completados\n\n`;
+      statusMessage += `💡 Si necesita iniciar una nueva solicitud, escriba 'nueva solicitud'`;
+      break;
+
     case "closed":
       statusMessage += `📍 Proceso finalizado\n`;
       statusMessage += `Puede iniciar una nueva solicitud escribiendo "hola"`;
@@ -512,13 +545,6 @@ async function handleQualificationFlow(client, text, from) {
     return true;
   }
 
-  // Validate answer
-  const validation = validateAnswer(text, currentQuestion.validationType);
-  if (!validation.valid) {
-    await sendTextMessage(from, validation.errorMsg);
-    return true;
-  }
-
   // Special logic for phone confirmation question
   if (currentQuestion.step === "q3_personal_phone_confirmed") {
     if (seemsLikePhoneNumber(text)) {
@@ -560,6 +586,21 @@ async function handleQualificationFlow(client, text, from) {
     }
 
     await sendTextMessage(from, "Por favor responda solo sí o no.");
+    return true;
+  }
+
+  if (currentQuestion.step === "q8b_work_phone" && inferMissingWorkPhone(text)) {
+    await sendTextMessage(from, "Si no cuenta con teléfono de trabajo, puede escribir *omitir* y paso a la siguiente pregunta.");
+    return true;
+  }
+
+  // Validate answer
+  const validation = validateAnswer(text, currentQuestion.validationType);
+  if (!validation.valid) {
+    const reminder = currentQuestion.step === "q8b_work_phone"
+      ? `${validation.errorMsg}\n\nSi no cuenta con teléfono de trabajo, escriba *omitir*.`
+      : `${validation.errorMsg}\n\nSi desea omitir esta pregunta, escriba *omitir*.`;
+    await sendTextMessage(from, reminder);
     return true;
   }
 
@@ -675,6 +716,25 @@ async function handleUnderReview(client, text, from, profileName) {
   return true;
 }
 
+async function handleContacted(client, text, from, profileName) {
+  if (fuzzyMatch(text, KEYWORDS.STATUS, 2)) {
+    await sendStatusMessage(from, client);
+    return true;
+  }
+
+  if (fuzzyMatch(text, KEYWORDS.NEW_APPLICATION, 2)) {
+    return beginNewApplicationConfirmation(client, from);
+  }
+
+  if (fuzzyMatch(text, KEYWORDS.UPDATE, 2)) {
+    await sendTextMessage(from, "Para actualizar su información, por favor inicie una nueva solicitud escribiendo 'nueva solicitud'. Esto nos permitirá revisar toda su información actualizada.");
+    return true;
+  }
+
+  await sendTextMessage(from, MESSAGES.CONTACTED);
+  return true;
+}
+
 async function handleClosed(client, text, from, profileName) {
   if (fuzzyMatch(text, KEYWORDS.NEW_APPLICATION, 2)) {
     return beginNewApplicationConfirmation(client, from);
@@ -706,5 +766,6 @@ module.exports = {
   handleQualificationFlow,
   handleDocumentsStage,
   handleUnderReview,
+  handleContacted,
   handleClosed
 };

@@ -109,6 +109,8 @@ Su solicitud pasará a revisión por un asesor. En breve nos comunicaremos con u
 
   UNDER_REVIEW: "Su solicitud ya se encuentra en revisión. En breve un asesor se comunicará con usted.\n\n💡 Puede escribir:\n• 'estado' para ver el progreso\n• 'nueva solicitud' para iniciar una aplicación diferente\n• 'actualizar' para información sobre cambios",
 
+  CONTACTED: "Su solicitud ya fue revisada y un asesor ya se puso en contacto con usted.\n\n💡 Puede escribir:\n• 'estado' para ver el progreso\n• 'nueva solicitud' para iniciar una aplicación diferente\n• 'actualizar' para información sobre cambios",
+
   CLOSED: "Su proceso anterior fue completado. ¿Le gustaría iniciar una nueva solicitud?\n\nEscriba 'nueva solicitud' para comenzar o 'estado' para más información.",
 
   WELCOME_BACK: "¡Bienvenido de vuelta! Continuemos con su solicitud.",

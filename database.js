@@ -47,8 +47,18 @@ function getClientsWithLastMessage() {
       `SELECT
         c.wa_id,
         c.profile_name,
+        c.full_name,
         c.stage,
+        c.question_step,
         c.status,
+        c.score,
+        c.expected_document,
+        c.ine_front_path,
+        c.ine_back_path,
+        c.proof_of_address_path,
+        c.house_front_path,
+        c.income_proof_path,
+        c.advisor_notified,
         c.updated_at,
         last_message.message_type AS last_message_type,
         last_message.message_text AS last_message_text,
@@ -167,7 +177,8 @@ function discardClientApplication(wa_id, profileName = null) {
     proof_of_address_path: null,
     house_front_path: null,
     income_proof_path: null,
-    advisor_notified: 0
+    advisor_notified: 0,
+    advisor_contacted: 0
   });
 }
 
