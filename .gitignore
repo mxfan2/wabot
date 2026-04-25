@@ -7,6 +7,7 @@ backups/
 env.txt
 
 *.log
+logs/
 *.db
 *.sqlite
 

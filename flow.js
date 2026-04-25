@@ -1,14 +1,19 @@
+// =========================
+// IMPORTS
+// =========================
 const { MESSAGES, KEYWORDS, DOCUMENTS, CONFIG } = require("./config");
 const {
   fuzzyMatch,
   includesKeyword,
   normalizeText,
   seemsLikePhoneNumber,
+  seemsLikeQuestion,
   shouldRemind,
   calculateClientScore,
   validateAnswer
 } = require("./utils");
 const { sendTextMessage } = require("./whatsapp");
+const { chooseApprovedReply, draftFlexibleReply } = require("./aiOperator");
 const {
   getClient,
   resetToStage1,
@@ -21,112 +26,141 @@ const {
 } = require("./database");
 
 // =========================
-// QUESTION FLOW
+// QUESTION FLOW (OPTIMIZED)
 // =========================
 const QUESTION_FLOW = [
   {
     step: "q1_full_name",
     field: "full_name",
-    question: "Muy bien, por favor conteste las siguientes preguntas para continuar:\n*---*\n¿Me confirma su nombre completo?",
+    question: "Perfecto. Para revisar tu solicitud necesito hacerte unas preguntas rápidas.\n\nPrimero, ¿me confirmas tu nombre completo?",
     validationType: "text"
   },
   {
     step: "q2_age",
     field: "age",
-    question: "¿Cuál es su edad?",
+    question: "¿Qué edad tienes?",
     validationType: "numeric"
   },
   {
     step: "q3_personal_phone_confirmed",
     field: "personal_phone_confirmed",
-    question: "¿Este sería su celular personal?",
+    question: "¿Este número de WhatsApp es tu celular personal?",
     validationType: "yesno"
   },
   {
     step: "q3b_personal_phone_number",
     field: "personal_phone_number",
-    question: "¿Cuál es su número de celular personal?",
+    question: "¿Cuál es tu número de celular personal?",
     validationType: "phone"
   },
   {
     step: "q4_marital_status",
     field: "marital_status",
-    question: "¿Usted se encuentra soltero(a), casado(a), viudo(a), divorciado(a) o separado(a)?",
+    question: "¿Estás soltero(a), casado(a), viudo(a), divorciado(a) o separado(a)?",
     validationType: "marital_status"
   },
   {
     step: "q5_debt_with_lender",
     field: "debt_with_lender",
-    question: "¿Le debe o le ha quedado a deber a alguna casa de préstamos como nosotros?",
-    preMessage: MESSAGES.PRE_QUESTION_5,
+    preMessage: "Aquí sí necesito que me respondas con confianza:",
+    question: "¿Actualmente debes o has quedado a deber en alguna casa de préstamos?",
     validationType: "yesno"
   },
   {
     step: "q6_job_name",
     field: "job_name",
-    question: "Sección 2\n*---*\n¿Dónde trabaja usted?",
+    question: "Ahora vamos con tus ingresos.\n\n¿De dónde viene tu ingreso principal?",
     validationType: "text"
+  },
+  {
+    step: "q6b_income_type",
+    field: "income_type",
+    question: "¿Es empleo, negocio propio, pensión, apoyo familiar, desempleado u otro?",
+    validationType: "income_type"
   },
   {
     step: "q7_income_proof_available",
     field: "income_proof_available",
-    question: "¿Cuenta con comprobante de ingresos?",
+    question: "¿Tienes comprobante de ingresos?",
     validationType: "yesno"
   },
   {
     step: "q8_work_address",
     field: "work_address",
-    question: "¿Qué dirección tiene su trabajo?",
+    question: "¿Cuál es la dirección de tu trabajo?",
     validationType: "address"
   },
   {
     step: "q8b_work_phone",
     field: "work_phone",
-    question: "¿Qué teléfono tiene su trabajo?",
+    question: "¿Tu trabajo tiene teléfono? ¿Cuál es?",
     validationType: "phone"
   },
   {
     step: "q9_years_at_job",
     field: "years_at_job",
-    question: `¿Cuántos años tiene trabajando ahí? (ej: 2, 2.5, 2 años y 8 meses)`,
+    question: "¿Cuánto tiempo llevas trabajando ahí? (ej: 2 años, 2.5, etc.)",
     validationType: "time_period"
   },
   {
     step: "q10_home_address",
     field: "home_address",
-    question: "¿Qué dirección tiene su domicilio?",
+    question: "¿Cuál es la dirección de tu domicilio?",
     validationType: "address"
   },
   {
     step: "q11_average_income",
     field: "average_income",
-    question: "¿Qué ingresos promedio tiene?",
+    question: "¿Cuánto ganas aproximadamente?",
     validationType: "numeric"
+  },
+  {
+    step: "q11b_income_frequency",
+    field: "income_frequency",
+    question: "¿Ese ingreso es por semana, quincena o mes?",
+    validationType: "income_frequency"
+  },
+  {
+    step: "q11c_extra_household_income_available",
+    field: "extra_household_income_available",
+    question: "¿En tu casa hay otro ingreso aparte del tuyo?",
+    validationType: "yesno"
+  },
+  {
+    step: "q11d_extra_household_income_details",
+    field: "extra_household_income_details",
+    question: "¿Quién aporta ese ingreso, cuánto aporta y cada cuándo?",
+    validationType: "household_income_details"
+  },
+  {
+    step: "q11e_current_debt_payments",
+    field: "current_debt_payments",
+    question: "¿Cuánto pagas por semana o quincena en otras deudas? Si no tienes, responde *0*.",
+    validationType: "debt_payments"
   },
   {
     step: "q12_years_at_home",
     field: "years_at_home",
-    question: `¿Cuántos años tiene viviendo en esa casa? (ej: 3, 3.5, 1 año y 6 meses)`,
+    question: "¿Cuánto tiempo llevas viviendo en esa casa?",
     validationType: "time_period"
   },
   {
     step: "q13_home_owner_name",
     field: "home_owner_name",
-    question: "¿A nombre de quién está la casa donde vive?",
+    question: "¿A nombre de quién está la casa donde vives?",
     validationType: "text"
   },
   {
     step: "q14_address_proof_name",
     field: "address_proof_name",
-    question: "¿El comprobante de domicilio a nombre de quién sale?",
+    question: "¿A nombre de quién aparece el comprobante de domicilio?",
     validationType: "text"
   }
 ];
 
 // =========================
-// FLOW HELPERS
+// HELPERS
 // =========================
-
 function getQuestionIndexByStep(step) {
   return QUESTION_FLOW.findIndex((q) => q.step === step);
 }
@@ -146,6 +180,11 @@ function exactKeywordMatch(text, keywords) {
   return keywords.has(clean);
 }
 
+// SOLO ciertas preguntas pueden omitirse
+const OPTIONAL_QUESTION_STEPS = new Set([
+  "q8b_work_phone"
+]);
+
 function isSkipCommand(text) {
   return exactKeywordMatch(text, KEYWORDS.SKIP);
 }
@@ -153,35 +192,392 @@ function isSkipCommand(text) {
 function isDoneCommand(text) {
   return exactKeywordMatch(text, KEYWORDS.DONE) || fuzzyMatch(text, KEYWORDS.DONE, 1);
 }
+// =========================
+// QUESTION SENDER (OPTIMIZED)
+// =========================
+async function sendQuestionByIndex(to, index) {
+  const question = QUESTION_FLOW[index];
+  if (!question) return;
 
-function inferStage1Intent(text) {
-  const clean = normalizeText(text);
-  const hasGreeting = includesKeyword(clean, KEYWORDS.RESTART);
-  const wantsInfo = includesKeyword(clean, new Set([
-    ...KEYWORDS.STAGE1_FAQ,
-    "informes",
-    "quiero info",
-    "quiero información",
-    "more info",
-    "mas info",
-    "más info"
-  ]));
-  const wantsApplication = includesKeyword(clean, new Set([
-    ...KEYWORDS.STAGE2_INTERESTED,
-    "solicitar",
-    "tramite",
-    "trámite",
-    "quiero el prestamo",
-    "quiero el préstamo"
-  ]));
+  if (question.preMessage) {
+    await sendTextMessage(to, question.preMessage);
+  }
 
-  if (hasGreeting && wantsInfo) return "faq";
-  if (hasGreeting && wantsApplication) return "faq";
-  if (wantsInfo) return "faq";
-  if (wantsApplication) return "interested";
-  return null;
+  await sendTextMessage(to, question.question);
+
+  // Solo algunas preguntas permiten omitir explícitamente
+  if (OPTIONAL_QUESTION_STEPS.has(question.step)) {
+    await sendTextMessage(to, "Si no cuentas con ese dato, escribe *omitir*.");
+  }
 }
 
+// =========================
+// STAGE 1 (MENÚ)
+// =========================
+async function handleStage1(client, text, from, profileName) {
+  const clean = normalizeText(text);
+
+  const wantsInfo = includesKeyword(clean, KEYWORDS.STAGE1_FAQ);
+  const wantsApplication = includesKeyword(clean, KEYWORDS.STAGE2_INTERESTED);
+
+  // 🔥 CAMBIO CLAVE: si ya quiere préstamo → directo a calificación
+  if (wantsApplication) {
+    await startQualificationFlow(from);
+    await sendQuestionByIndex(from, 0);
+    return true;
+  }
+
+  if (wantsInfo) {
+    await moveToStage2(from);
+    await sendTextMessage(from, MESSAGES.FAQ);
+    return true;
+  }
+
+  // fallback
+  await resetToStage1(from, profileName);
+  await sendTextMessage(from, await chooseApprovedReply("loopback", {
+    wa_id: from,
+    userText: text,
+    stage: client?.stage
+  }, MESSAGES.LOOPBACK));
+
+  return true;
+}
+
+// =========================
+// STAGE 2 (FAQ → INTERÉS)
+// =========================
+async function handleStage2(client, text, from, profileName) {
+
+  // interesado → iniciar flujo
+  if (includesKeyword(text, KEYWORDS.STAGE2_INTERESTED)) {
+    await startQualificationFlow(from);
+    await sendQuestionByIndex(from, 0);
+    return true;
+  }
+
+  // no interesado
+  if (includesKeyword(text, KEYWORDS.STAGE2_NOT_INTERESTED)) {
+    await markNotInterested(from);
+    await sendTextMessage(from, await chooseApprovedReply("not_interested", {
+      wa_id: from,
+      userText: text
+    }, "Gracias por tu tiempo."));
+    return true;
+  }
+
+  // fallback
+  await resetToStage1(from, profileName);
+  await sendTextMessage(from, await chooseApprovedReply("loopback", {
+    wa_id: from,
+    userText: text,
+    stage: client?.stage
+  }, MESSAGES.LOOPBACK));
+
+  return true;
+}
+
+// =========================
+// QUALIFICATION FLOW (CORE)
+// =========================
+async function handleQualificationFlow(client, text, from) {
+  const currentIndex = getQuestionIndexByStep(client.question_step);
+
+  if (currentIndex === -1) {
+    await startQualificationFlow(from);
+    await sendQuestionByIndex(from, 0);
+    return true;
+  }
+
+  const currentQuestion = QUESTION_FLOW[currentIndex];
+
+  // =========================
+  // SI EL USUARIO HACE PREGUNTA
+  // =========================
+  if (seemsLikeQuestion(text)) {
+    const fallbackReply = `Eso lo puede confirmar un asesor.\n\nPor ahora seguimos con esto:\n\n${currentQuestion.question}`;
+
+    await sendTextMessage(from, await draftFlexibleReply({
+      situation: "user_asked_question_mid_flow",
+      currentQuestion: currentQuestion.question,
+      userText: text
+    }, fallbackReply));
+
+    return true;
+  }
+
+  // =========================
+  // OMITIR
+  // =========================
+  if (isSkipCommand(text)) {
+    if (!OPTIONAL_QUESTION_STEPS.has(currentQuestion.step)) {
+      await sendTextMessage(from, await draftFlexibleReply({
+        situation: "skip_not_allowed_for_required_question",
+        wa_id: from,
+        stage: client.stage,
+        questionStep: currentQuestion.step,
+        currentQuestion: currentQuestion.question,
+        userText: text,
+        desiredOutcome: "Explain briefly that this question is needed and ask the applicant to answer it."
+      }, "Esta pregunta sí la necesito para continuar. ¿Me puedes responder, por favor?"));
+      return true;
+    }
+
+    await updateClient(from, { [currentQuestion.field]: "OMITIDO" });
+
+    const nextIndex = currentIndex + 1;
+
+    if (nextIndex < QUESTION_FLOW.length) {
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        question_step: nextQuestion.step,
+        stage: nextIndex <= 5 ? "section_1" : "section_2"
+      });
+
+      await sendTextMessage(from, await chooseApprovedReply("omitted_answer", {
+        wa_id: from,
+        questionStep: currentQuestion.step
+      }, "Listo, seguimos."));
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    // fin → documentos
+    const updatedClient = await getClient(from);
+    const score = calculateClientScore(updatedClient);
+
+    await updateClient(from, { score });
+    await moveToDocumentsStage(from);
+
+    await sendTextMessage(from, MESSAGES.DOCUMENTS_INTRO);
+    await sendTextMessage(from, DOCUMENTS.PROMPTS.ine_front);
+
+    return true;
+  }
+  // =========================
+  // TELÉFONO PERSONAL
+  // =========================
+  if (currentQuestion.step === "q2_age") {
+    const age = parseInt(String(text || "").replace(/\D/g, ""), 10);
+
+    if (!Number.isNaN(age) && age <= 17) {
+      await updateClient(from, {
+        age: text,
+        stage: "closed",
+        question_step: null,
+        status: "underage",
+        expected_document: null
+      });
+
+      await sendTextMessage(from, MESSAGES.UNDERAGE);
+      return true;
+    }
+  }
+
+  // =========================
+  // TELÉFONO PERSONAL
+  // =========================
+  if (currentQuestion.step === "q3_personal_phone_confirmed") {
+    if (seemsLikePhoneNumber(text)) {
+      const nextIndex = getQuestionIndexByStep("q4_marital_status");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        personal_phone_confirmed: "no",
+        personal_phone_number: text,
+        question_step: nextQuestion.step,
+        stage: "section_1"
+      });
+
+      await sendTextMessage(from, await chooseApprovedReply("personal_phone_saved", {
+        wa_id: from,
+        questionStep: currentQuestion.step
+      }, "Listo, tomaré ese número como tu celular personal."));
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    if (exactKeywordMatch(text, KEYWORDS.YES)) {
+      const nextIndex = getQuestionIndexByStep("q4_marital_status");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        personal_phone_confirmed: text,
+        question_step: nextQuestion.step,
+        stage: "section_1"
+      });
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    if (exactKeywordMatch(text, KEYWORDS.NO)) {
+      const nextIndex = getQuestionIndexByStep("q3b_personal_phone_number");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        personal_phone_confirmed: text,
+        question_step: nextQuestion.step,
+        stage: "section_1"
+      });
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    await sendTextMessage(from, await chooseApprovedReply("yes_no_only", {
+      wa_id: from,
+      questionStep: currentQuestion.step,
+      userText: text
+    }, "Aquí solo necesito que me respondas *sí* o *no*."));
+
+    return true;
+  }
+
+  // =========================
+  // INGRESO EXTRA EN EL HOGAR
+  // =========================
+  if (currentQuestion.step === "q11c_extra_household_income_available") {
+    if (hasHouseholdIncomeDetails(text)) {
+      const nextIndex = getQuestionIndexByStep("q11e_current_debt_payments");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        extra_household_income_available: "si",
+        extra_household_income_details: text,
+        question_step: nextQuestion.step,
+        stage: "section_2"
+      });
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    if (exactKeywordMatch(text, KEYWORDS.YES)) {
+      const nextIndex = getQuestionIndexByStep("q11d_extra_household_income_details");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        extra_household_income_available: text,
+        question_step: nextQuestion.step,
+        stage: "section_2"
+      });
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    if (exactKeywordMatch(text, KEYWORDS.NO)) {
+      const nextIndex = getQuestionIndexByStep("q11e_current_debt_payments");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+
+      await updateClient(from, {
+        extra_household_income_available: text,
+        extra_household_income_details: null,
+        question_step: nextQuestion.step,
+        stage: "section_2"
+      });
+
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+
+    await sendTextMessage(from, await draftFlexibleReply({
+      situation: "unclear_extra_household_income_answer",
+      wa_id: from,
+      stage: client.stage,
+      questionStep: currentQuestion.step,
+      currentQuestion: currentQuestion.question,
+      userText: text,
+      desiredOutcome: "Ask clearly if there is extra household income. If yes, ask who contributes, how much, and how often."
+    }, "Si sí, dime quién aporta, cuánto y cada cuándo. Si no, responde *no*."));
+
+    return true;
+  }
+
+  // =========================
+  // TELÉFONO DE TRABAJO NO DISPONIBLE
+  // =========================
+  if (currentQuestion.step === "q8b_work_phone" && inferMissingWorkPhone(text)) {
+    await sendTextMessage(from, await draftFlexibleReply({
+      situation: "applicant_says_work_has_no_phone",
+      wa_id: from,
+      stage: client.stage,
+      questionStep: currentQuestion.step,
+      currentQuestion: currentQuestion.question,
+      userText: text,
+      desiredOutcome: "Tell the applicant they can write omitir if there is no work phone."
+    }, "No hay problema. Si tu trabajo no tiene teléfono, escribe *omitir* y seguimos."));
+
+    return true;
+  }
+
+  // =========================
+  // VALIDACIÓN NORMAL
+  // =========================
+  const validation = validateAnswer(text, currentQuestion.validationType);
+
+  if (!validation.valid) {
+    const reminder = OPTIONAL_QUESTION_STEPS.has(currentQuestion.step)
+      ? `${validation.errorMsg}\n\nSi no cuentas con ese dato, escribe *omitir*.`
+      : validation.errorMsg;
+
+    await sendTextMessage(from, await draftFlexibleReply({
+      situation: "invalid_or_unclear_answer_to_current_question",
+      wa_id: from,
+      stage: client.stage,
+      questionStep: currentQuestion.step,
+      currentQuestion: currentQuestion.question,
+      validationType: currentQuestion.validationType,
+      validationError: validation.errorMsg,
+      userText: text,
+      desiredOutcome: "Help the applicant understand what answer is needed without sounding robotic."
+    }, reminder));
+
+    return true;
+  }
+
+  // =========================
+  // GUARDAR RESPUESTA Y AVANZAR
+  // =========================
+  await updateClient(from, { [currentQuestion.field]: text });
+
+  const nextIndex = currentIndex + 1;
+
+  if (nextIndex < QUESTION_FLOW.length) {
+    const nextQuestion = QUESTION_FLOW[nextIndex];
+
+    await updateClient(from, {
+      question_step: nextQuestion.step,
+      stage: nextIndex <= 5 ? "section_1" : "section_2"
+    });
+
+    await sendQuestionByIndex(from, nextIndex);
+    return true;
+  }
+
+  // =========================
+  // TERMINA CALIFICACIÓN → DOCUMENTOS
+  // =========================
+  const updatedClient = await getClient(from);
+  const score = calculateClientScore(updatedClient);
+
+  console.log(`Client ${from} completed qualification. Score: ${score}/100`);
+
+  await updateClient(from, { score });
+  await moveToDocumentsStage(from);
+
+  await sendTextMessage(from, MESSAGES.DOCUMENTS_INTRO);
+  await sendTextMessage(from, DOCUMENTS.PROMPTS.ine_front);
+
+  return true;
+}
+// =========================
+// INTENT HELPERS
+// =========================
 function inferIncomeProofIssue(text) {
   const clean = normalizeText(text);
   const phrases = [
@@ -217,6 +613,26 @@ function inferMissingWorkPhone(text) {
   return phrases.some((phrase) => clean.includes(phrase));
 }
 
+function hasHouseholdIncomeDetails(text) {
+  const clean = normalizeText(text);
+  const hasAmount = /\d/.test(clean);
+  const hasFrequency =
+    clean.includes("semana") ||
+    clean.includes("quincena") ||
+    clean.includes("mes") ||
+    clean.includes("mensual");
+
+  const hasContributor = [
+    "esposo", "esposa", "pareja", "mama", "mamá", "papa", "papá",
+    "hijo", "hija", "hermano", "hermana", "familia", "yo", "negocio"
+  ].some((word) => clean.includes(word));
+
+  return hasAmount && hasFrequency && hasContributor;
+}
+
+// =========================
+// DOCUMENT HELPERS
+// =========================
 function getStoredDocumentValues(rawValue) {
   if (!rawValue) return [];
   if (rawValue === "SKIPPED") return ["SKIPPED"];
@@ -253,22 +669,14 @@ function getDocumentProgress(client) {
   };
 
   const total = Object.keys(docs).length;
-  const completed = Object.values(docs).filter(path => path).length;
+  const completed = Object.values(docs).filter((path) => path).length;
 
   return { completed, total };
 }
 
-async function sendQuestionByIndex(to, index) {
-  const question = QUESTION_FLOW[index];
-  if (!question) return;
-
-  if (question.preMessage) {
-    await sendTextMessage(to, question.preMessage);
-  }
-
-  await sendTextMessage(to, `${question.question}\n\nSi desea omitir esta pregunta, escriba *omitir*.`);
-}
-
+// =========================
+// REMIND CURRENT STEP
+// =========================
 async function remindCurrentStep(to, client) {
   if (!client || !client.stage) {
     await sendTextMessage(to, MESSAGES.MENU);
@@ -279,9 +687,11 @@ async function remindCurrentStep(to, client) {
     case "stage_1":
       await sendTextMessage(to, MESSAGES.MENU);
       return;
+
     case "stage_2":
       await sendTextMessage(to, MESSAGES.FAQ);
       return;
+
     case "section_1":
     case "section_2": {
       const currentIndex = getQuestionIndexByStep(client.question_step);
@@ -289,42 +699,57 @@ async function remindCurrentStep(to, client) {
         await sendQuestionByIndex(to, 0);
         return;
       }
+
       await sendQuestionByIndex(to, currentIndex);
       return;
     }
+
     case "awaiting_documents":
       if (client.expected_document && DOCUMENTS.PROMPTS[client.expected_document]) {
         await sendTextMessage(to, DOCUMENTS.PROMPTS[client.expected_document]);
         return;
       }
+
       await sendTextMessage(to, MESSAGES.DOCUMENTS_INTRO);
       return;
+
     case "under_review":
       await sendTextMessage(to, MESSAGES.UNDER_REVIEW);
       return;
+
     case "contacted":
       await sendTextMessage(to, MESSAGES.CONTACTED);
       return;
+
     case "closed":
       await sendTextMessage(to, MESSAGES.CLOSED);
       return;
+
     default:
       await sendTextMessage(to, MESSAGES.MENU);
   }
 }
 
+// =========================
+// ADVANCE DOCUMENTS
+// =========================
 async function advanceDocumentsFlow(from, currentDoc, currentValue = null) {
   const fieldName = getDocumentFieldName(currentDoc);
   const nextDoc = getNextDocumentKey(currentDoc);
+
   const completionMessage = currentValue === "SKIPPED"
     ? "Documento omitido."
-    : "Documento registrado correctamente.";
+    : await chooseApprovedReply("document_received", {
+        wa_id: from,
+        expectedDocument: currentDoc
+      }, "Listo, documento recibido.");
 
   if (nextDoc) {
     await updateClient(from, {
       [fieldName]: currentValue,
       expected_document: nextDoc
     });
+
     await sendTextMessage(from, completionMessage);
     await sendTextMessage(from, DOCUMENTS.PROMPTS[nextDoc]);
     return true;
@@ -337,10 +762,19 @@ async function advanceDocumentsFlow(from, currentDoc, currentValue = null) {
     status: "documents_uploaded"
   });
 
+  const finalClient = await getClient(from);
+
+  if (finalClient) {
+    await updateClient(from, { score: calculateClientScore(finalClient) });
+  }
+
   await sendTextMessage(from, MESSAGES.DOCUMENTS_CLOSE);
   return false;
 }
 
+// =========================
+// NEW APPLICATION CONFIRMATION
+// =========================
 async function beginNewApplicationConfirmation(client, from) {
   if (!client || client.stage === "stage_1") {
     await sendTextMessage(from, MESSAGES.MENU);
@@ -348,65 +782,87 @@ async function beginNewApplicationConfirmation(client, from) {
   }
 
   await updateClient(from, { pending_action: "confirm_restart" });
-  await sendTextMessage(from, MESSAGES.NEW_APPLICATION_WARNING);
+
+  await sendTextMessage(from, await chooseApprovedReply("confirm_restart_prompt", {
+    wa_id: from,
+    stage: client.stage,
+    status: client.status
+  }, MESSAGES.NEW_APPLICATION_WARNING));
+
   return true;
 }
 
+// =========================
+// PENDING ACTIONS
+// =========================
 async function resolvePendingAction(client, text, from, profileName) {
   if (!client?.pending_action) return false;
 
   if (client.pending_action === "confirm_restart") {
-    if (fuzzyMatch(text, KEYWORDS.YES, 2)) {
+    if (exactKeywordMatch(text, KEYWORDS.YES)) {
       await discardClientApplication(from, profileName);
-      await sendTextMessage(from, "Entendido. Su solicitud anterior fue descartada y comenzaremos una nueva.");
+
+      await sendTextMessage(from, await chooseApprovedReply("restart_confirmed", {
+        wa_id: from,
+        userText: text
+      }, "Listo, vamos a empezar una nueva solicitud."));
+
       await sendTextMessage(from, MESSAGES.MENU);
       return true;
     }
 
-    if (fuzzyMatch(text, KEYWORDS.NO, 2)) {
+    if (exactKeywordMatch(text, KEYWORDS.NO)) {
       await updateClient(from, { pending_action: null });
-      await sendTextMessage(from, "Perfecto. Conservaremos su trámite actual.");
+
+      await sendTextMessage(from, await chooseApprovedReply("keep_current_application", {
+        wa_id: from,
+        userText: text,
+        stage: client.stage
+      }, "Perfecto, seguimos con tu solicitud actual."));
+
       const refreshedClient = await getClient(from);
       await remindCurrentStep(from, refreshedClient);
       return true;
     }
 
-    await sendTextMessage(from, "Por favor responda *si* para descartar la solicitud anterior o *no* para conservarla.");
+    await sendTextMessage(from, await chooseApprovedReply("invalid_restart_confirmation", {
+      wa_id: from,
+      userText: text
+    }, "Aquí solo necesito que me respondas *sí* o *no*."));
+
     return true;
   }
 
   return false;
 }
-
 // =========================
 // STATUS MANAGEMENT
 // =========================
-
 async function sendStatusMessage(to, client) {
   if (!client) {
-    await sendTextMessage(to, "No tengo información de su proceso actual.");
+    await sendTextMessage(to, "No tengo información de tu proceso actual.");
     return;
   }
 
-  let statusMessage = `*ESTADO DE SU SOLICITUD*\n\n`;
+  let statusMessage = `*ESTADO DE TU SOLICITUD*\n\n`;
 
   switch (client.stage) {
     case "stage_1":
-      statusMessage += `📍 Está en el menú principal\n`;
-      statusMessage += `Próximo paso: Elegir una opción del menú`;
+      statusMessage += `📍 Estás en el menú principal\n`;
+      statusMessage += `Siguiente paso: elegir una opción del menú`;
       break;
 
     case "stage_2":
-      statusMessage += `📍 Viendo preguntas frecuentes\n`;
-      statusMessage += `Próximo paso: Indicar si está interesado`;
+      statusMessage += `📍 Estás revisando la información del préstamo\n`;
+      statusMessage += `Siguiente paso: indicar si quieres continuar`;
       break;
 
     case "section_1":
-    case "section_2":
+    case "section_2": {
       const currentIndex = getQuestionIndexByStep(client.question_step);
       const totalQuestions = QUESTION_FLOW.length;
-      const completed = currentIndex;
-      const remaining = totalQuestions - currentIndex;
+      const completed = currentIndex >= 0 ? currentIndex : 0;
+      const remaining = currentIndex >= 0 ? totalQuestions - currentIndex : totalQuestions;
 
       statusMessage += `📍 Contestando preguntas de calificación\n`;
       statusMessage += `Progreso: ${completed}/${totalQuestions} preguntas completadas\n`;
@@ -414,34 +870,44 @@ async function sendStatusMessage(to, client) {
 
       if (currentIndex >= 0 && currentIndex < QUESTION_FLOW.length) {
         const currentQuestion = QUESTION_FLOW[currentIndex];
-        statusMessage += `Pregunta actual: ${currentQuestion.question.split('\n')[0]}`;
+        statusMessage += `Pregunta actual: ${currentQuestion.question.split("\n").pop()}`;
       }
-      break;
 
-    case "awaiting_documents":
-      statusMessage += `📍 Enviando documentos\n`;
-      const docProgress = getDocumentProgress(client);
-      statusMessage += `Progreso: ${docProgress.completed}/${docProgress.total} documentos enviados\n`;
-      statusMessage += `Documento pendiente: ${DOCUMENTS.PROMPTS[client.expected_document] || "Documento específico"}`;
       break;
+    }
+
+    case "awaiting_documents": {
+      const docProgress = getDocumentProgress(client);
+
+      statusMessage += `📍 Enviando documentos\n`;
+      statusMessage += `Progreso: ${docProgress.completed}/${docProgress.total} documentos enviados\n`;
+
+      if (client.expected_document && DOCUMENTS.PROMPTS[client.expected_document]) {
+        statusMessage += `Documento pendiente:\n${DOCUMENTS.PROMPTS[client.expected_document]}`;
+      } else {
+        statusMessage += `Documento pendiente: documento específico`;
+      }
+
+      break;
+    }
 
     case "under_review":
-      statusMessage += `📍 Solicitud en revisión por asesor\n`;
-      statusMessage += `Estado: Esperando contacto del asesor\n`;
+      statusMessage += `📍 Tu solicitud ya está en revisión\n`;
+      statusMessage += `Estado: esperando contacto de un asesor\n`;
       statusMessage += `Documentos: ${getDocumentProgress(client).completed}/5 completados\n\n`;
-      statusMessage += `💡 Si necesita iniciar una nueva solicitud, escriba 'nueva solicitud'`;
+      statusMessage += `Si necesitas iniciar otra solicitud, escribe *nueva solicitud*.`;
       break;
 
     case "contacted":
-      statusMessage += `📍 Asesor ya contactó al solicitante\n`;
-      statusMessage += `Estado: Seguimiento posterior al contacto\n`;
+      statusMessage += `📍 Un asesor ya se puso en contacto contigo\n`;
+      statusMessage += `Estado: seguimiento posterior al contacto\n`;
       statusMessage += `Documentos: ${getDocumentProgress(client).completed}/5 completados\n\n`;
-      statusMessage += `💡 Si necesita iniciar una nueva solicitud, escriba 'nueva solicitud'`;
+      statusMessage += `Si necesitas iniciar otra solicitud, escribe *nueva solicitud*.`;
       break;
 
     case "closed":
       statusMessage += `📍 Proceso finalizado\n`;
-      statusMessage += `Puede iniciar una nueva solicitud escribiendo "hola"`;
+      statusMessage += `Puedes iniciar otra solicitud escribiendo *nueva solicitud*.`;
       break;
 
     default:
@@ -452,191 +918,16 @@ async function sendStatusMessage(to, client) {
 }
 
 // =========================
-// MAIN FLOW HANDLERS
+// DOCUMENTS STAGE
 // =========================
-
-async function handleStage1(client, text, from, profileName) {
-  const inferredIntent = inferStage1Intent(text);
-
-  if (inferredIntent === "faq" || fuzzyMatch(text, KEYWORDS.STAGE1_FAQ, 2) || includesKeyword(text, KEYWORDS.STAGE1_FAQ)) {
-    await moveToStage2(from);
-    await sendTextMessage(from, MESSAGES.FAQ);
-    return true;
-  }
-
-  if (inferredIntent === "interested") {
-    await moveToStage2(from);
-    await sendTextMessage(from, MESSAGES.FAQ);
-    return true;
-  }
-
-  await resetToStage1(from, profileName);
-  await sendTextMessage(from, MESSAGES.LOOPBACK);
-  return true;
-}
-
-async function handleStage2(client, text, from, profileName) {
-  if (fuzzyMatch(text, KEYWORDS.STAGE2_INTERESTED, 2) || includesKeyword(text, KEYWORDS.STAGE2_INTERESTED)) {
-    await startQualificationFlow(from);
-    await sendQuestionByIndex(from, 0);
-    return true;
-  }
-
-  if (fuzzyMatch(text, KEYWORDS.STAGE2_NOT_INTERESTED, 2) || includesKeyword(text, KEYWORDS.STAGE2_NOT_INTERESTED)) {
-    await markNotInterested(from);
-    await sendTextMessage(from, "Muchas gracias por su interés.");
-    return true;
-  }
-
-  await resetToStage1(from, profileName);
-  await sendTextMessage(from, MESSAGES.LOOPBACK);
-  return true;
-}
-
-async function handleQualificationFlow(client, text, from) {
-  const currentIndex = getQuestionIndexByStep(client.question_step);
-
-  if (currentIndex === -1) {
-    await startQualificationFlow(from);
-    await sendQuestionByIndex(from, 0);
-    return true;
-  }
-
-  // Check if user might need a reminder
-  if (shouldRemind(client.updated_at, CONFIG.QUESTION_REMINDER_HOURS)) {
-    const currentQuestion = QUESTION_FLOW[currentIndex];
-    await sendTextMessage(from, MESSAGES.CONTINUE);
-    await sendQuestionByIndex(from, currentIndex);
-    return true;
-  }
-
-  const currentQuestion = QUESTION_FLOW[currentIndex];
-
-  if (isSkipCommand(text)) {
-    await updateClient(from, { [currentQuestion.field]: "OMITIDO" });
-
-    const nextIndex = currentQuestion.step === "q3_personal_phone_confirmed"
-      ? getQuestionIndexByStep("q4_marital_status")
-      : currentIndex + 1;
-
-    if (nextIndex < QUESTION_FLOW.length) {
-      const nextQuestion = QUESTION_FLOW[nextIndex];
-      const nextStage = nextIndex <= 5 ? "section_1" : "section_2";
-
-      await updateClient(from, {
-        question_step: nextQuestion.step,
-        stage: nextStage
-      });
-
-      await sendTextMessage(from, "Respuesta omitida.");
-      await sendQuestionByIndex(from, nextIndex);
-      return true;
-    }
-
-    const updatedClient = await getClient(from);
-    const score = calculateClientScore(updatedClient);
-
-    console.log(`Client ${from} completed qualification. Score: ${score}/100`);
-    await updateClient(from, { score });
-    await moveToDocumentsStage(from);
-    await sendTextMessage(from, "Respuesta omitida.");
-    await sendTextMessage(from, MESSAGES.DOCUMENTS_INTRO);
-    await sendTextMessage(from, DOCUMENTS.PROMPTS.ine_front);
-    return true;
-  }
-
-  // Special logic for phone confirmation question
-  if (currentQuestion.step === "q3_personal_phone_confirmed") {
-    if (seemsLikePhoneNumber(text)) {
-      const nextIndex = getQuestionIndexByStep("q4_marital_status");
-      const nextQuestion = QUESTION_FLOW[nextIndex];
-      await updateClient(from, {
-        personal_phone_confirmed: "no",
-        personal_phone_number: text,
-        question_step: nextQuestion.step,
-        stage: "section_1"
-      });
-      await sendTextMessage(from, "Tomaré ese número como su celular personal.");
-      await sendQuestionByIndex(from, nextIndex);
-      return true;
-    }
-
-    if (fuzzyMatch(text, KEYWORDS.YES, 2)) {
-      await updateClient(from, { [currentQuestion.field]: text });
-      const nextIndex = getQuestionIndexByStep("q4_marital_status");
-      const nextQuestion = QUESTION_FLOW[nextIndex];
-      await updateClient(from, {
-        question_step: nextQuestion.step,
-        stage: "section_1"
-      });
-      await sendQuestionByIndex(from, nextIndex);
-      return true;
-    }
-
-    if (fuzzyMatch(text, KEYWORDS.NO, 2)) {
-      await updateClient(from, { [currentQuestion.field]: text });
-      const nextIndex = getQuestionIndexByStep("q3b_personal_phone_number");
-      const nextQuestion = QUESTION_FLOW[nextIndex];
-      await updateClient(from, {
-        question_step: nextQuestion.step,
-        stage: "section_1"
-      });
-      await sendQuestionByIndex(from, nextIndex);
-      return true;
-    }
-
-    await sendTextMessage(from, "Por favor responda solo sí o no.");
-    return true;
-  }
-
-  if (currentQuestion.step === "q8b_work_phone" && inferMissingWorkPhone(text)) {
-    await sendTextMessage(from, "Si no cuenta con teléfono de trabajo, puede escribir *omitir* y paso a la siguiente pregunta.");
-    return true;
-  }
-
-  // Validate answer
-  const validation = validateAnswer(text, currentQuestion.validationType);
-  if (!validation.valid) {
-    const reminder = currentQuestion.step === "q8b_work_phone"
-      ? `${validation.errorMsg}\n\nSi no cuenta con teléfono de trabajo, escriba *omitir*.`
-      : `${validation.errorMsg}\n\nSi desea omitir esta pregunta, escriba *omitir*.`;
-    await sendTextMessage(from, reminder);
-    return true;
-  }
-
-  // Save answer and move to next question
-  await updateClient(from, { [currentQuestion.field]: text });
-
-  const nextIndex = currentIndex + 1;
-
-  if (nextIndex < QUESTION_FLOW.length) {
-    const nextQuestion = QUESTION_FLOW[nextIndex];
-    const nextStage = nextIndex <= 5 ? "section_1" : "section_2";
-
-    await updateClient(from, {
-      question_step: nextQuestion.step,
-      stage: nextStage
-    });
-
-    await sendQuestionByIndex(from, nextIndex);
-    return true;
-  }
-
-  // Complete qualification - calculate score and move to documents
-  const updatedClient = await getClient(from);
-  const score = calculateClientScore(updatedClient);
-
-  console.log(`Client ${from} completed qualification. Score: ${score}/100`);
-  await updateClient(from, { score });
-  await moveToDocumentsStage(from);
-  await sendTextMessage(from, MESSAGES.DOCUMENTS_INTRO);
-  await sendTextMessage(from, DOCUMENTS.PROMPTS.ine_front);
-  return true;
-}
-
 async function handleDocumentsStage(client, text, from) {
   if (!client?.expected_document) {
-    await sendTextMessage(from, "No encontré el documento pendiente. Retomemos su flujo actual.");
+    await sendTextMessage(from, await chooseApprovedReply("missing_expected_document", {
+      wa_id: from,
+      stage: client?.stage,
+      userText: text
+    }, "No encontré el documento pendiente. Retomemos tu flujo actual."));
+
     await remindCurrentStep(from, client);
     return true;
   }
@@ -645,77 +936,122 @@ async function handleDocumentsStage(client, text, from) {
     const fieldName = getDocumentFieldName(client.expected_document);
     const currentValue = client[fieldName];
     const valueToStore = hasUsableDocumentValue(currentValue) ? currentValue : "SKIPPED";
-    const shouldNotifyAdvisor = !(await advanceDocumentsFlow(from, client.expected_document, valueToStore));
 
-    if (shouldNotifyAdvisor) {
+    const shouldContinue = await advanceDocumentsFlow(from, client.expected_document, valueToStore);
+
+    if (!shouldContinue) {
       const updatedClient = await getClient(from);
       await require("./whatsapp").notifyAdvisor(updatedClient);
     }
+
     return true;
   }
 
   if (client.expected_document === "income_proof" && isDoneCommand(text)) {
     const currentValue = client.income_proof_path;
+
     if (!hasUsableDocumentValue(currentValue)) {
-      await sendTextMessage(from, "Aún no tengo ningún comprobante de ingresos. Puede enviarlo ahora o escribir *omitir* para continuar sin este documento.");
+      await sendTextMessage(from, await chooseApprovedReply("no_income_proof_yet", {
+        wa_id: from,
+        stage: client.stage,
+        expectedDocument: client.expected_document,
+        userText: text
+      }, "Todavía no recibo comprobante de ingresos. Puedes mandarlo ahora o escribir *omitir*."));
+
       return true;
     }
 
     const updatedClient = await getClient(from);
-    const shouldNotifyAdvisor = !(await advanceDocumentsFlow(from, client.expected_document, updatedClient.income_proof_path));
+    const shouldContinue = await advanceDocumentsFlow(
+      from,
+      client.expected_document,
+      updatedClient.income_proof_path
+    );
 
-    if (shouldNotifyAdvisor) {
+    if (!shouldContinue) {
       const finalClient = await getClient(from);
       await require("./whatsapp").notifyAdvisor(finalClient);
     }
+
     return true;
   }
 
   if (client.expected_document === "income_proof" && inferIncomeProofIssue(text)) {
-    await sendTextMessage(from, "Si le pagan en efectivo o no tiene talón, todavía puede continuar. Puede enviar screenshots de depósitos de los últimos 3 meses o un estado de cuenta. Si de plano no cuenta con eso, escriba *omitir* y seguimos con su solicitud.");
+    await sendTextMessage(from, await chooseApprovedReply("income_proof_issue", {
+      wa_id: from,
+      stage: client.stage,
+      expectedDocument: client.expected_document,
+      userText: text
+    }, "No pasa nada si no tienes talón. Puedes mandar capturas de depósitos, estado de cuenta o escribir *omitir*."));
+
     return true;
   }
 
-  // Check if user might need a reminder
   if (shouldRemind(client.updated_at, CONFIG.DOCUMENT_REMINDER_HOURS)) {
     const prompt = DOCUMENTS.PROMPTS[client.expected_document];
+
     if (prompt) {
-      await sendTextMessage(from, `Recordatorio: ${prompt}`);
+      await sendTextMessage(from, `Recordatorio:\n\n${prompt}`);
       return true;
     }
   }
 
   if (client.expected_document === "income_proof") {
-    await sendTextMessage(from, "En este paso puede enviar uno o varios comprobantes de ingresos. Cuando termine, escriba *listo*. Si desea continuar sin este documento, escriba *omitir*.");
+    await sendTextMessage(from, await chooseApprovedReply("income_proof_instruction", {
+      wa_id: from,
+      stage: client.stage,
+      expectedDocument: client.expected_document,
+      userText: text
+    }, "Puedes enviar uno o varios comprobantes. Cuando termines, escribe *listo*. Si no tienes comprobante, escribe *omitir*."));
+
     return true;
   }
 
-  await sendTextMessage(from, "En este paso necesito que envíe la imagen o archivo del documento solicitado. Si desea omitirlo, escriba *omitir*. Si tiene duda sobre qué documento sigue, escriba *estado*.");
+  await sendTextMessage(from, await chooseApprovedReply("document_required", {
+    wa_id: from,
+    stage: client.stage,
+    expectedDocument: client.expected_document,
+    userText: text
+  }, "Para continuar necesito que mandes el documento solicitado."));
+
   return true;
 }
 
+// =========================
+// UNDER REVIEW
+// =========================
 async function handleUnderReview(client, text, from, profileName) {
-  // Allow status check
   if (fuzzyMatch(text, KEYWORDS.STATUS, 2)) {
     await sendStatusMessage(from, client);
     return true;
   }
 
-  // Allow new application
   if (fuzzyMatch(text, KEYWORDS.NEW_APPLICATION, 2)) {
     return beginNewApplicationConfirmation(client, from);
   }
 
-  // Allow update requests
   if (fuzzyMatch(text, KEYWORDS.UPDATE, 2)) {
-    await sendTextMessage(from, "Para actualizar su información, por favor inicie una nueva solicitud escribiendo 'nueva solicitud'. Esto nos permitirá revisar toda su información actualizada.");
+    await sendTextMessage(from, await chooseApprovedReply("update_requires_new_application", {
+      wa_id: from,
+      stage: client.stage,
+      userText: text
+    }, "Para actualizar tu información, inicia una nueva solicitud escribiendo *nueva solicitud*."));
+
     return true;
   }
 
-  await sendTextMessage(from, MESSAGES.UNDER_REVIEW);
+  await sendTextMessage(from, await chooseApprovedReply("under_review", {
+    wa_id: from,
+    stage: client.stage,
+    userText: text
+  }, MESSAGES.UNDER_REVIEW));
+
   return true;
 }
 
+// =========================
+// CONTACTED
+// =========================
 async function handleContacted(client, text, from, profileName) {
   if (fuzzyMatch(text, KEYWORDS.STATUS, 2)) {
     await sendStatusMessage(from, client);
@@ -727,7 +1063,12 @@ async function handleContacted(client, text, from, profileName) {
   }
 
   if (fuzzyMatch(text, KEYWORDS.UPDATE, 2)) {
-    await sendTextMessage(from, "Para actualizar su información, por favor inicie una nueva solicitud escribiendo 'nueva solicitud'. Esto nos permitirá revisar toda su información actualizada.");
+    await sendTextMessage(from, await chooseApprovedReply("update_requires_new_application", {
+      wa_id: from,
+      stage: client.stage,
+      userText: text
+    }, "Para actualizar tu información, inicia una nueva solicitud escribiendo *nueva solicitud*."));
+
     return true;
   }
 
@@ -735,6 +1076,9 @@ async function handleContacted(client, text, from, profileName) {
   return true;
 }
 
+// =========================
+// CLOSED
+// =========================
 async function handleClosed(client, text, from, profileName) {
   if (fuzzyMatch(text, KEYWORDS.NEW_APPLICATION, 2)) {
     return beginNewApplicationConfirmation(client, from);
@@ -744,6 +1088,9 @@ async function handleClosed(client, text, from, profileName) {
   return true;
 }
 
+// =========================
+// EXPORTS
+// =========================
 module.exports = {
   QUESTION_FLOW,
   getQuestionIndexByStep,

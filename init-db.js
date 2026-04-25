@@ -24,12 +24,17 @@ db.serialize(() => {
       debt_with_lender TEXT,
 
       job_name TEXT,
+      income_type TEXT,
       income_proof_available TEXT,
       work_address TEXT,
       work_phone TEXT,
       years_at_job TEXT,
       home_address TEXT,
       average_income TEXT,
+      income_frequency TEXT,
+      extra_household_income_available TEXT,
+      extra_household_income_details TEXT,
+      current_debt_payments TEXT,
       years_at_home TEXT,
       home_owner_name TEXT,
       address_proof_name TEXT,
@@ -78,7 +83,12 @@ db.serialize(() => {
       { name: "score", sql: "INTEGER DEFAULT 0" },
       { name: "personal_phone_number", sql: "TEXT" },
       { name: "pending_action", sql: "TEXT" },
-      { name: "advisor_contacted", sql: "INTEGER DEFAULT 0" }
+      { name: "advisor_contacted", sql: "INTEGER DEFAULT 0" },
+      { name: "income_type", sql: "TEXT" },
+      { name: "income_frequency", sql: "TEXT" },
+      { name: "extra_household_income_available", sql: "TEXT" },
+      { name: "extra_household_income_details", sql: "TEXT" },
+      { name: "current_debt_payments", sql: "TEXT" }
     ];
 
     for (const column of expectedColumns) {

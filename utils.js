@@ -78,8 +78,40 @@ function seemsLikeQuestion(text) {
 
 function extractNumberFromText(text) {
   if (!text) return 0;
-  const match = text.match(/(\d+(\.\d+)?)/);
+  const match = String(text).replace(/,/g, "").match(/(\d+(\.\d+)?)/);
   return match ? parseFloat(match[1]) : 0;
+}
+
+function normalizeIncomeToWeekly(text) {
+  const amount = extractNumberFromText(text);
+  if (!amount) return 0;
+
+  const clean = normalizeText(text);
+  if (clean.includes("mes") || clean.includes("mensual")) return amount / 4.33;
+  if (clean.includes("quincena") || clean.includes("quincenal")) return amount / 2;
+  return amount;
+}
+
+function normalizeDebtPaymentToWeekly(text) {
+  const clean = normalizeText(text);
+  if (!clean || clean === "0" || fuzzyMatch(text, KEYWORDS.NO, 2)) return 0;
+  return normalizeIncomeToWeekly(text);
+}
+
+function hasUsableDocument(rawValue) {
+  if (!rawValue) return false;
+  if (rawValue === "SKIPPED") return false;
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (Array.isArray(parsed)) {
+      return parsed.some((value) => value && value !== "SKIPPED");
+    }
+  } catch (error) {
+    // Older rows may contain a single plain path.
+  }
+
+  return Boolean(rawValue);
 }
 
 function getHoursSince(date) {
@@ -108,7 +140,7 @@ const VALIDATION_RULES = {
 
   numeric: {
     validate: (value) => {
-      const num = parseInt(value, 10);
+      const num = extractNumberFromText(value);
       return !isNaN(num) && num > 0;
     },
     errorMsg: "Por favor introduzca un valor numérico válido."
@@ -128,6 +160,43 @@ const VALIDATION_RULES = {
       return clean.length >= CONFIG.ADDRESS_MIN_LENGTH;
     },
     errorMsg: `Por favor introduzca una dirección válida (mínimo ${CONFIG.ADDRESS_MIN_LENGTH} caracteres).`
+  },
+
+  income_type: {
+    validate: (value) => {
+      const clean = normalizeText(value || "");
+      const options = [
+        "empleado", "empleada", "empresa", "trabajo", "negocio", "propio",
+        "independiente", "pension", "pensión", "pensionado", "pensionada",
+        "apoyo", "ama de casa", "desempleado", "desempleada", "otro"
+      ];
+      return options.some(opt => clean.includes(opt));
+    },
+    errorMsg: "Por favor indique si es empleado(a), negocio propio, pensionado(a), apoyo familiar/ama de casa, desempleado(a) u otro."
+  },
+
+  income_frequency: {
+    validate: (value) => {
+      const clean = normalizeText(value || "");
+      return clean.includes("semana") || clean.includes("quincena") || clean.includes("mes") || clean.includes("mensual");
+    },
+    errorMsg: "Por favor indique si el ingreso es por semana, por quincena o por mes."
+  },
+
+  household_income_details: {
+    validate: (value) => {
+      const clean = (value || "").trim();
+      return clean.length >= 3 && /\d/.test(clean);
+    },
+    errorMsg: "Por favor indique quién aporta, cuánto aporta y cada cuándo. Ejemplo: mi esposo gana 8000 a la semana."
+  },
+
+  debt_payments: {
+    validate: (value) => {
+      const clean = normalizeText(value || "");
+      return fuzzyMatch(value, KEYWORDS.NO, 2) || clean === "0" || /\d/.test(clean);
+    },
+    errorMsg: "Por favor indique cuánto paga por semana o quincena en otras deudas. Si no tiene pagos, responda 0 o no."
   },
 
   marital_status: {
@@ -178,59 +247,93 @@ function validateAnswer(value, validationType) {
 function calculateClientScore(client) {
   let score = 0;
 
-  // Scoring criteria:
-  // +20: Income proof available (yes)
-  // +5/+10/+20: Years at job (1-2/3-5/6+ years)
-  // +5/+10/+20: Years at home (1-2/3-5/6+ years)
-  // +15: Home owner name matches full name
-  // +15: No debt with lender
-  // +5/+10: Marital status (married/single)
-  // +10: Age 25-55 (prime working age)
-  // Max score: 100
+  // V2 scoring criteria:
+  // +25: Declared income capacity against the highest weekly payment in the current product table
+  // +20: Income proof answer + uploaded income document
+  // +15: Employment stability and work verifiability
+  // +15: Residence stability and address consistency
+  // +15: No existing debt with similar lender
+  // +10: Identity/address/house document completeness
+  // Age and marital status are collected but do not add score points.
 
-  // Income proof available (+20 if yes)
-  if (fuzzyMatch(client.income_proof_available, KEYWORDS.YES, 2)) {
-    score += CONFIG.SCORING.INCOME_PROOF;
+  // Payment capacity. Until desired loan amount is collected, use the highest
+  // listed weekly payment ($750) as a conservative benchmark.
+  const weeklyIncome = normalizeIncomeToWeekly(`${client.average_income || ""} ${client.income_frequency || ""}`);
+  const extraWeeklyIncome = fuzzyMatch(client.extra_household_income_available, KEYWORDS.YES, 2)
+    ? normalizeIncomeToWeekly(client.extra_household_income_details)
+    : 0;
+  const weeklyDebtPayments = normalizeDebtPaymentToWeekly(client.current_debt_payments);
+  const netWeeklyHouseholdIncome = Math.max(weeklyIncome + extraWeeklyIncome - weeklyDebtPayments, 0);
+
+  if (netWeeklyHouseholdIncome > 0) {
+    const ratio = netWeeklyHouseholdIncome / 750;
+    if (ratio >= 4) score += CONFIG.SCORING.PAYMENT_CAPACITY;
+    else if (ratio >= 3) score += 20;
+    else if (ratio >= 2) score += 14;
+    else if (ratio >= 1) score += 7;
   }
 
-  // Years at job (parse numbers from text)
+  // Income proof availability and uploaded proof.
+  if (fuzzyMatch(client.income_proof_available, KEYWORDS.YES, 2)) {
+    score += CONFIG.SCORING.INCOME_PROOF_ANSWER;
+  }
+  if (hasUsableDocument(client.income_proof_path)) {
+    score += CONFIG.SCORING.INCOME_PROOF_DOCUMENT;
+  }
+
+  // Employment stability.
   const jobYears = extractNumberFromText(client.years_at_job);
   if (jobYears >= 6) score += CONFIG.SCORING.JOB_YEARS['6+'];
   else if (jobYears >= 3) score += CONFIG.SCORING.JOB_YEARS['3-5'];
   else if (jobYears >= 1) score += CONFIG.SCORING.JOB_YEARS['1-2'];
 
-  // Years at home
+  // Work verifiability.
+  let workScore = 0;
+  if (client.job_name && client.job_name !== "OMITIDO") workScore += 1;
+  if (client.income_type && client.income_type !== "OMITIDO") {
+    const incomeType = normalizeText(client.income_type);
+    if (incomeType.includes("emple") || incomeType.includes("empresa") || incomeType.includes("negocio") || incomeType.includes("propio") || incomeType.includes("pension") || incomeType.includes("pensión")) {
+      workScore += 1;
+    }
+  }
+  if (client.work_address && client.work_address !== "OMITIDO") workScore += 2;
+  if (client.work_phone && client.work_phone !== "OMITIDO") workScore += 2;
+  else if (client.work_phone === "OMITIDO") workScore += 1;
+  score += Math.min(workScore, CONFIG.SCORING.WORK_VERIFIABILITY);
+
+  // Residence stability.
   const homeYears = extractNumberFromText(client.years_at_home);
   if (homeYears >= 6) score += CONFIG.SCORING.HOME_YEARS['6+'];
   else if (homeYears >= 3) score += CONFIG.SCORING.HOME_YEARS['3-5'];
   else if (homeYears >= 1) score += CONFIG.SCORING.HOME_YEARS['1-2'];
 
-  // Home owner name (if matches full name)
-  if (client.home_owner_name && client.full_name) {
-    const ownerClean = normalizeText(client.home_owner_name);
+  // Address consistency is a weak verification signal, not a property-ownership reward.
+  if (client.full_name) {
     const nameClean = normalizeText(client.full_name);
-    if (ownerClean.includes(nameClean) || nameClean.includes(ownerClean)) {
-      score += CONFIG.SCORING.HOME_OWNERSHIP;
+    const homeOwnerClean = normalizeText(client.home_owner_name);
+    const proofNameClean = normalizeText(client.address_proof_name);
+    if (
+      (homeOwnerClean && (homeOwnerClean.includes(nameClean) || nameClean.includes(homeOwnerClean))) ||
+      (proofNameClean && (proofNameClean.includes(nameClean) || nameClean.includes(proofNameClean)))
+    ) {
+      score += CONFIG.SCORING.ADDRESS_CONSISTENCY;
     }
   }
 
-  // Debt with lender (no debt = good)
+  // Existing debt exposure with similar lender.
   if (fuzzyMatch(client.debt_with_lender, KEYWORDS.NO, 2)) {
     score += CONFIG.SCORING.NO_DEBT;
   }
 
-  // Marital status (married = stable, single = flexible)
-  if (client.marital_status) {
-    const status = normalizeText(client.marital_status);
-    if (status.includes('casado')) score += CONFIG.SCORING.MARITAL_STATUS.married;
-    else if (status.includes('soltero')) score += CONFIG.SCORING.MARITAL_STATUS.single;
-  }
-
-  // Age (prime working age)
-  const age = parseInt(client.age);
-  if (!isNaN(age) && age >= CONFIG.SCORING.AGE_RANGE.min && age <= CONFIG.SCORING.AGE_RANGE.max) {
-    score += CONFIG.SCORING.AGE_RANGE.points;
-  }
+  // Identity and residence documents. Income proof is scored above.
+  const identityDocs = [
+    client.ine_front_path,
+    client.ine_back_path,
+    client.proof_of_address_path,
+    client.house_front_path
+  ];
+  const identityDocScore = identityDocs.filter(hasUsableDocument).length * 2.5;
+  score += Math.min(identityDocScore, CONFIG.SCORING.IDENTITY_DOCUMENTS);
 
   return Math.min(score, CONFIG.MAX_SCORE); // Cap at 100
 }
@@ -243,6 +346,8 @@ module.exports = {
   seemsLikePhoneNumber,
   seemsLikeQuestion,
   extractNumberFromText,
+  normalizeIncomeToWeekly,
+  normalizeDebtPaymentToWeekly,
   getHoursSince,
   shouldRemind,
   validateAnswer,

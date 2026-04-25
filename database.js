@@ -18,7 +18,12 @@ db.all(`PRAGMA table_info(clients)`, (err, rows) => {
     { name: "score", sql: "INTEGER DEFAULT 0" },
     { name: "personal_phone_number", sql: "TEXT" },
     { name: "pending_action", sql: "TEXT" },
-    { name: "advisor_contacted", sql: "INTEGER DEFAULT 0" }
+    { name: "advisor_contacted", sql: "INTEGER DEFAULT 0" },
+    { name: "income_type", sql: "TEXT" },
+    { name: "income_frequency", sql: "TEXT" },
+    { name: "extra_household_income_available", sql: "TEXT" },
+    { name: "extra_household_income_details", sql: "TEXT" },
+    { name: "current_debt_payments", sql: "TEXT" }
   ];
 
   for (const column of expectedColumns) {
@@ -162,12 +167,17 @@ function discardClientApplication(wa_id, profileName = null) {
     marital_status: null,
     debt_with_lender: null,
     job_name: null,
+    income_type: null,
     income_proof_available: null,
     work_address: null,
     work_phone: null,
     years_at_job: null,
     home_address: null,
     average_income: null,
+    income_frequency: null,
+    extra_household_income_available: null,
+    extra_household_income_details: null,
+    current_debt_payments: null,
     years_at_home: null,
     home_owner_name: null,
     address_proof_name: null,

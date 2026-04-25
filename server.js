@@ -4,8 +4,9 @@ const fs = require("fs");
 const path = require("path");
 
 const { CONFIG, MESSAGES, KEYWORDS, DOCUMENTS } = require("./config");
-const { fuzzyMatch, shouldRemind } = require("./utils");
+const { fuzzyMatch, includesKeyword, shouldRemind } = require("./utils");
 const { sendTextMessage, downloadMedia, notifyAdvisor } = require("./whatsapp");
+const { chooseApprovedReply, diagnoseLocalAi, proposeOperatorAction } = require("./aiOperator");
 const {
   getClient,
   getClientsWithLastMessage,
@@ -67,12 +68,17 @@ const QUALIFICATION_FIELDS = [
   { field: "marital_status", label: "Estado civil" },
   { field: "debt_with_lender", label: "¿Tiene deuda con prestamista?" },
   { field: "job_name", label: "Trabajo / empresa" },
+  { field: "income_type", label: "Tipo de ingreso" },
   { field: "income_proof_available", label: "¿Tiene comprobante de ingresos?" },
   { field: "work_address", label: "Dirección de trabajo" },
   { field: "work_phone", label: "Teléfono de trabajo" },
   { field: "years_at_job", label: "Antigüedad en el trabajo" },
   { field: "home_address", label: "Dirección de domicilio" },
   { field: "average_income", label: "Ingreso promedio" },
+  { field: "income_frequency", label: "Frecuencia de ingreso" },
+  { field: "extra_household_income_available", label: "Ingreso extra / familiar" },
+  { field: "extra_household_income_details", label: "Detalle de ingreso extra" },
+  { field: "current_debt_payments", label: "Pagos de deudas actuales" },
   { field: "years_at_home", label: "Tiempo en domicilio" },
   { field: "home_owner_name", label: "Titular de la vivienda" },
   { field: "address_proof_name", label: "Titular del comprobante de domicilio" }
@@ -1371,14 +1377,49 @@ async function handleIncomingText(from, text, profileName, messageId) {
     wa_message_id: messageId
   });
 
+  if (String(text || "").trim() === CONFIG.LOCAL_AI_HEALTHCHECK_TOKEN) {
+    const diagnostic = await diagnoseLocalAi();
+    const status = diagnostic.ok ? "OK" : "FAIL";
+    const lines = [
+      `AI operator health check: ${status}`,
+      `Model: ${diagnostic.model || "(not configured)"}`,
+      `Time: ${diagnostic.durationMs} ms`
+    ];
+
+    if (diagnostic.ok) {
+      lines.push(`Variant: ${diagnostic.replyKey} #${diagnostic.variantIndex}`);
+      lines.push(`Reply: ${diagnostic.reply}`);
+    } else {
+      lines.push(`Error: ${diagnostic.error || "Unknown error"}`);
+    }
+
+    await sendTextMessage(from, lines.join("\n"));
+    return;
+  }
+
   let client = await getClient(from);
+
+  if (CONFIG.LOCAL_AI_ENABLED && CONFIG.LOCAL_AI_ACTION_PROPOSALS) {
+    proposeOperatorAction({
+      wa_id: from,
+      profileName,
+      stage: client?.stage,
+      questionStep: client?.question_step,
+      expectedDocument: client?.expected_document,
+      status: client?.status,
+      messageType: "text",
+      userText: text
+    }).catch((error) => {
+      console.warn("[AI operator] background action proposal failed:", error.message);
+    });
+  }
 
   if (await resolvePendingAction(client, text, from, profileName)) {
     return;
   }
 
   // Global restart/new application command
-  if (fuzzyMatch(text, KEYWORDS.RESTART, 2) || fuzzyMatch(text, KEYWORDS.NEW_APPLICATION, 2)) {
+  if (includesKeyword(text, KEYWORDS.RESTART) || fuzzyMatch(text, KEYWORDS.NEW_APPLICATION, 2)) {
     if (!client || client.stage === "stage_1") {
       await resetToStage1(from, profileName);
       await sendTextMessage(from, MESSAGES.MENU);
@@ -1466,7 +1507,11 @@ async function handleIncomingMedia(from, profileName, messageId, type, mediaId, 
       wa_message_id: messageId
     });
 
-    await sendTextMessage(from, "Antes de continuar, por favor responda *si* o *no* a la confirmación de nueva solicitud.");
+    await sendTextMessage(from, await chooseApprovedReply("pending_restart_media", {
+      wa_id: from,
+      stage: client.stage,
+      messageType: type
+    }, "Antes de continuar, por favor responda *si* o *no* a la confirmación de nueva solicitud."));
     return;
   }
 
@@ -1479,7 +1524,11 @@ async function handleIncomingMedia(from, profileName, messageId, type, mediaId, 
       wa_message_id: messageId
     });
 
-    await sendTextMessage(from, "Aun no necesito archivos. Por favor continúe con el paso actual.");
+    await sendTextMessage(from, await chooseApprovedReply("files_not_needed", {
+      wa_id: from,
+      stage: client?.stage,
+      messageType: type
+    }, "Aun no necesito archivos. Por favor continúe con el paso actual."));
     await remindCurrentStep(from, client);
     return;
   }
@@ -1503,7 +1552,11 @@ async function handleIncomingMedia(from, profileName, messageId, type, mediaId, 
   const fieldName = getDocumentFieldName(currentDoc);
 
   if (!fieldName) {
-    await sendTextMessage(from, "No fue posible identificar el documento esperado.");
+    await sendTextMessage(from, await chooseApprovedReply("unknown_document_expected", {
+      wa_id: from,
+      expectedDocument: currentDoc,
+      messageType: type
+    }, "No fue posible identificar el documento esperado."));
     return;
   }
 
@@ -1513,7 +1566,11 @@ async function handleIncomingMedia(from, profileName, messageId, type, mediaId, 
       [fieldName]: nextValue
     });
 
-    await sendTextMessage(from, "Comprobante recibido correctamente. Si desea enviar otro archivo, puede hacerlo ahora. Cuando termine, escriba *listo*. Si desea continuar sin enviar más, escriba *omitir*.");
+    await sendTextMessage(from, await chooseApprovedReply("income_proof_received", {
+      wa_id: from,
+      expectedDocument: currentDoc,
+      messageType: type
+    }, "Comprobante recibido correctamente. Si desea enviar otro archivo, puede hacerlo ahora. Cuando termine, escriba *listo*. Si desea continuar sin enviar más, escriba *omitir*."));
     return;
   }
 
@@ -1530,7 +1587,12 @@ async function handleIncomingMedia(from, profileName, messageId, type, mediaId, 
     await updateClient(from, {
       expected_document: nextDoc
     });
-    await sendTextMessage(from, "Documento recibido correctamente.");
+    await sendTextMessage(from, await chooseApprovedReply("document_received", {
+      wa_id: from,
+      expectedDocument: currentDoc,
+      nextDocument: nextDoc,
+      messageType: type
+    }, "Documento recibido correctamente."));
     await sendTextMessage(from, require("./config").DOCUMENTS.PROMPTS[nextDoc]);
   } else {
     const shouldNotifyAdvisor = !(await advanceDocumentsFlow(from, currentDoc, filePath));
