@@ -13,7 +13,7 @@ const {
   validateAnswer
 } = require("./utils");
 const { sendTextMessage } = require("./whatsapp");
-const { chooseApprovedReply, draftFlexibleReply } = require("./aiOperator");
+const { chooseApprovedReply, draftFlexibleReply, classifyFlowAnswer } = require("./aiOperator");
 const {
   getClient,
   resetToStage1,
@@ -290,6 +290,87 @@ async function handleQualificationFlow(client, text, from) {
   }
 
   const currentQuestion = QUESTION_FLOW[currentIndex];
+
+  // =========================
+  // CLASIFICADORES IA PARA RESPUESTAS NATURALES
+  // =========================
+  if (currentQuestion.step === "q5_debt_with_lender") {
+    const classified = await classifyFlowAnswer({ classifier: "debt_yes_no", userText: text, currentQuestion, client });
+    if (classified.recognized && classified.confidence >= 0.7 && (classified.value === "yes" || classified.value === "no")) {
+      const debtValue = classified.value === "yes" ? "si" : "no";
+      await updateClient(from, { debt_with_lender: debtValue });
+      const nextIndex = currentIndex + 1;
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+      await updateClient(from, {
+        question_step: nextQuestion.step,
+        stage: nextIndex <= 5 ? "section_1" : "section_2"
+      });
+      let reply;
+      if (classified.frustrated) {
+        reply = "Tienes razón, ya quedó registrado. Seguimos con lo siguiente.";
+      } else if (classified.value === "no") {
+        reply = "Perfecto, lo registro como que no tienes adeudos pendientes en casas de préstamo.";
+      } else {
+        reply = "Entendido, lo registro. Un asesor puede revisar más detalle si hace falta.";
+      }
+      await sendTextMessage(from, reply);
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+  }
+
+  if (currentQuestion.step === "q6_job_name") {
+    const classified = await classifyFlowAnswer({ classifier: "income_source", userText: text, currentQuestion, client });
+    if (classified.recognized && classified.confidence >= 0.7 && classified.value !== "unknown") {
+      const updates = {
+        job_name: text,
+        income_type: classified.value
+      };
+      await updateClient(from, updates);
+      const nextIndex = getQuestionIndexByStep("q7_income_proof_available");
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+      await updateClient(from, {
+        question_step: nextQuestion.step,
+        stage: "section_2"
+      });
+      let reply;
+      if (classified.value === "negocio_propio") {
+        reply = classified.extra.business_type ? `Perfecto, entonces tu ingreso viene de tu negocio propio: ${classified.extra.business_type}.` : "Perfecto, entonces tu ingreso viene de tu negocio propio.";
+      } else if (classified.value === "empleo") {
+        reply = "Perfecto, entonces tu ingreso viene de empleo.";
+      } else if (classified.value === "pension") {
+        reply = "Perfecto, entonces tu ingreso viene de pensión.";
+      } else if (classified.value === "apoyo_familiar") {
+        reply = "Perfecto, entonces tu ingreso viene de apoyo familiar.";
+      } else if (classified.value === "desempleado") {
+        reply = "Entendido, lo registro.";
+      } else {
+        reply = "Perfecto, lo registro.";
+      }
+      await sendTextMessage(from, reply);
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+  }
+
+  if (currentQuestion.step === "q6b_income_type") {
+    const classified = await classifyFlowAnswer({ classifier: "income_source", userText: text, currentQuestion, client });
+    if (classified.recognized && classified.confidence >= 0.7 && classified.value !== "unknown") {
+      const updates = {
+        income_type: classified.value
+      };
+      await updateClient(from, updates);
+      const nextIndex = currentIndex + 1;
+      const nextQuestion = QUESTION_FLOW[nextIndex];
+      await updateClient(from, {
+        question_step: nextQuestion.step,
+        stage: "section_2"
+      });
+      await sendTextMessage(from, "Perfecto, entendido.");
+      await sendQuestionByIndex(from, nextIndex);
+      return true;
+    }
+  }
 
   // =========================
   // SI EL USUARIO HACE PREGUNTA

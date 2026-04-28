@@ -602,11 +602,235 @@ async function proposeOperatorAction(context = {}) {
   }
 }
 
+async function classifyFlowAnswer({ classifier, userText, currentQuestion, client = {} }) {
+  const startedAt = Date.now();
+
+  if (!isAiAvailable()) {
+    writeAiDebugLog({
+      type: "flow_classifier",
+      status: "skipped",
+      classifier,
+      userText,
+      reason: "ai_unavailable_or_disabled",
+      durationMs: Date.now() - startedAt
+    });
+    return {
+      recognized: false,
+      value: null,
+      confidence: 0,
+      extra: {},
+      frustrated: false,
+      reason: "ai_unavailable"
+    };
+  }
+
+  const classifiers = {
+    debt_yes_no: {
+      allowedValues: ["yes", "no", "unknown"],
+      examples: {
+        yes: [
+          "sí",
+          "si debo",
+          "tengo deuda",
+          "quedé debiendo",
+          "debo en una financiera",
+          "debo en una casa de préstamos",
+          "estoy pagando uno",
+          "tengo préstamo activo"
+        ],
+        no: [
+          "no",
+          "que no",
+          "ya te dije que no",
+          "no debo",
+          "no le debo",
+          "no yo no le debo",
+          "para nada",
+          "nel",
+          "nunca",
+          "no he quedado mal"
+        ],
+        unknown: []
+      },
+      frustratedPhrases: [
+        "ya te dije",
+        "otra vez",
+        "te estoy diciendo",
+        "que no"
+      ]
+    },
+    income_source: {
+      allowedValues: ["empleo", "negocio_propio", "pension", "apoyo_familiar", "desempleado", "otro", "unknown"],
+      examples: {
+        empleo: [
+          "trabajo en una empresa",
+          "soy empleado",
+          "tengo trabajo",
+          "trabajo en oficina"
+        ],
+        negocio_propio: [
+          "tengo una estética",
+          "vendo comida",
+          "tengo un puesto",
+          "emprendimiento",
+          "negocio personal",
+          "trabajo por mi cuenta",
+          "soy independiente"
+        ],
+        pension: [
+          "pensión",
+          "soy pensionado"
+        ],
+        apoyo_familiar: [
+          "me ayuda mi familia",
+          "me apoya mi esposo"
+        ],
+        desempleado: [
+          "no trabajo",
+          "desempleado"
+        ],
+        otro: [],
+        unknown: []
+      },
+      frustratedPhrases: []
+    }
+  };
+
+  const classifierConfig = classifiers[classifier];
+  if (!classifierConfig) {
+    writeAiDebugLog({
+      type: "flow_classifier",
+      status: "invalid_classifier",
+      classifier,
+      userText,
+      durationMs: Date.now() - startedAt
+    });
+    return {
+      recognized: false,
+      value: null,
+      confidence: 0,
+      extra: {},
+      frustrated: false,
+      reason: "invalid_classifier"
+    };
+  }
+
+  const payload = {
+    task: "classify_flow_answer",
+    classifier,
+    userText,
+    currentQuestion: currentQuestion?.question || "",
+    allowedValues: classifierConfig.allowedValues,
+    examples: classifierConfig.examples,
+    frustratedPhrases: classifierConfig.frustratedPhrases,
+    requiredJsonShape: {
+      recognized: true,
+      value: "one of allowedValues",
+      confidence: 0.9,
+      extra: {},
+      frustrated: false,
+      reason: "short internal reason"
+    }
+  };
+
+  try {
+    const result = await requestLocalAi(payload);
+
+    // Validación defensiva
+    const recognized = Boolean(result?.recognized);
+    const value = String(result?.value || "").trim();
+    const confidence = Number(result?.confidence || 0);
+    const extra = (typeof result?.extra === "object" && result.extra !== null) ? result.extra : {};
+    const frustrated = Boolean(result?.frustrated);
+    const reason = String(result?.reason || "ai_response");
+
+    if (!classifierConfig.allowedValues.includes(value)) {
+      writeAiDebugLog({
+        type: "flow_classifier",
+        status: "invalid_choice",
+        classifier,
+        userText,
+        value,
+        allowedValues: classifierConfig.allowedValues,
+        durationMs: Date.now() - startedAt,
+        rawResult: result
+      });
+      return {
+        recognized: false,
+        value: null,
+        confidence: 0,
+        extra: {},
+        frustrated: false,
+        reason: "invalid_value"
+      };
+    }
+
+    if (!Number.isFinite(confidence) || confidence < 0.7) {
+      writeAiDebugLog({
+        type: "flow_classifier",
+        status: "low_confidence",
+        classifier,
+        userText,
+        value,
+        confidence,
+        durationMs: Date.now() - startedAt
+      });
+      return {
+        recognized: false,
+        value: null,
+        confidence: 0,
+        extra: {},
+        frustrated: false,
+        reason: "low_confidence"
+      };
+    }
+
+    writeAiDebugLog({
+      type: "flow_classifier",
+      status: "success",
+      classifier,
+      userText,
+      value,
+      confidence,
+      frustrated,
+      durationMs: Date.now() - startedAt
+    });
+
+    return {
+      recognized,
+      value,
+      confidence,
+      extra,
+      frustrated,
+      reason
+    };
+  } catch (error) {
+    console.warn(`[AI operator] flow classifier error: ${error.message}`);
+    writeAiDebugLog({
+      type: "flow_classifier",
+      status: "error",
+      classifier,
+      userText,
+      durationMs: Date.now() - startedAt,
+      error: error.message
+    });
+    return {
+      recognized: false,
+      value: null,
+      confidence: 0,
+      extra: {},
+      frustrated: false,
+      reason: "error"
+    };
+  }
+}
+
 module.exports = {
   chooseApprovedReply,
   draftFlexibleReply,
   diagnoseLocalAi,
   proposeOperatorAction,
+  classifyFlowAnswer,
   getApprovedVariants,
   isAiAvailable,
   writeAiDebugLog
