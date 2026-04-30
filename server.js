@@ -1,12 +1,20 @@
 require("dotenv").config();
 const express = require("express");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
 const { CONFIG, MESSAGES, KEYWORDS, DOCUMENTS } = require("./config");
 const { fuzzyMatch, includesKeyword, shouldRemind } = require("./utils");
 const { sendTextMessage, downloadMedia, notifyAdvisor } = require("./whatsapp");
-const { chooseApprovedReply, diagnoseLocalAi, proposeOperatorAction } = require("./aiOperator");
+const { chooseApprovedReply, diagnoseLocalAi, generateAdvisorInsight, proposeOperatorAction } = require("./aiOperator");
+const {
+  createCustomer,
+  createSpeiRecurrentPaymentSource,
+  createReusableClabeOrder,
+  extractSpeiPaymentInfo,
+  summarizeConektaError
+} = require("./conekta");
 const {
   getClient,
   getClientsWithLastMessage,
@@ -14,6 +22,10 @@ const {
   createClientIfNotExists,
   updateClient,
   saveMessage,
+  createPaymentOrder,
+  getPaymentOrderByProviderOrderId,
+  markPaymentOrderPaid,
+  savePaymentTransaction,
   resetToStage1,
   discardClientApplication,
   closeDatabase
@@ -44,7 +56,14 @@ const {
 } = require("./flow");
 
 const app = express();
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({
+  limit: "20mb",
+  verify: (req, res, buf) => {
+    if (req.originalUrl === "/payments/conekta/webhook") {
+      req.rawBody = buf.toString("utf8");
+    }
+  }
+}));
 
 // Create runtime folders up front so media downloads and local data storage
 // do not fail later when the first request arrives.
@@ -172,6 +191,376 @@ function buildClientOverview(client) {
     qualification,
     documents
   };
+}
+
+function parseAmountToCents(value) {
+  const amount = Number(String(value || "").replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return Math.round(amount * 100);
+}
+
+function formatCurrencyFromCents(amountCents, currency = "MXN") {
+  const amount = Number(amountCents || 0) / 100;
+  return new Intl.NumberFormat("es-MX", {
+    style: "currency",
+    currency
+  }).format(amount);
+}
+
+function formatPemPublicKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  if (raw.includes("\\n")) {
+    return raw.replace(/\\n/g, "\n");
+  }
+
+  const body = raw
+    .replace(/-----BEGIN PUBLIC KEY-----/g, "")
+    .replace(/-----END PUBLIC KEY-----/g, "")
+    .replace(/\s+/g, "");
+
+  const wrapped = body.match(/.{1,64}/g)?.join("\n") || body;
+  return `-----BEGIN PUBLIC KEY-----\n${wrapped}\n-----END PUBLIC KEY-----`;
+}
+
+function verifyConektaWebhookSignature(req) {
+  const publicKey = formatPemPublicKey(CONFIG.CONEKTA_WEBHOOK_PUBLIC_KEY);
+  if (!publicKey) {
+    return { ok: true, skipped: true, reason: "missing_public_key" };
+  }
+
+  const digest = req.get("digest");
+  const payload = req.rawBody;
+
+  if (!digest || !payload) {
+    return { ok: false, reason: "missing_digest_or_payload" };
+  }
+
+  try {
+    const verified = crypto.verify(
+      "RSA-SHA256",
+      Buffer.from(payload, "utf8"),
+      publicKey,
+      Buffer.from(digest, "base64")
+    );
+
+    return { ok: verified, skipped: false, reason: verified ? "verified" : "invalid_signature" };
+  } catch (error) {
+    return { ok: false, skipped: false, reason: error.message };
+  }
+}
+
+async function createConektaSpeiPaymentForClient(client, amountCents, description = "Pago semanal") {
+  let conektaCustomerId = client.conekta_customer_id;
+  let conektaSpeiSourceId = client.conekta_spei_source_id;
+  let conektaSpeiClabe = client.conekta_spei_clabe;
+  let conektaSpeiBank = client.conekta_spei_bank;
+
+  if (!conektaCustomerId) {
+    const customer = await createCustomer({
+      waId: client.wa_id,
+      name: client.full_name || client.profile_name || client.wa_id,
+      email: client.email || CONFIG.CONEKTA_DEFAULT_EMAIL,
+      phone: client.personal_phone_number || client.wa_id
+    });
+
+    conektaCustomerId = customer.id;
+    await updateClient(client.wa_id, { conekta_customer_id: conektaCustomerId });
+  }
+
+  if (!conektaSpeiSourceId || !conektaSpeiClabe) {
+    const source = await createSpeiRecurrentPaymentSource(conektaCustomerId);
+    conektaSpeiSourceId = source.id;
+    conektaSpeiClabe = source.reference || null;
+    conektaSpeiBank = source.bank || null;
+
+    await updateClient(client.wa_id, {
+      conekta_spei_source_id: conektaSpeiSourceId,
+      conekta_spei_clabe: conektaSpeiClabe,
+      conekta_spei_bank: conektaSpeiBank
+    });
+  }
+
+  const order = await createReusableClabeOrder({
+    customerId: conektaCustomerId,
+    waId: client.wa_id,
+    amountCents,
+    description,
+    metadata: {
+      client_stage: client.stage || "",
+      client_status: client.status || "",
+      spei_source_id: conektaSpeiSourceId
+    }
+  });
+
+  const paymentInfo = extractSpeiPaymentInfo(order);
+  await createPaymentOrder({
+    wa_id: client.wa_id,
+    provider: "conekta",
+    provider_order_id: paymentInfo.orderId,
+    provider_charge_id: paymentInfo.chargeId,
+    amount_cents: paymentInfo.amountCents || amountCents,
+    currency: paymentInfo.currency || "MXN",
+    status: paymentInfo.status || "pending_payment",
+    clabe: paymentInfo.clabe || conektaSpeiClabe,
+    bank: paymentInfo.bank || conektaSpeiBank,
+    expires_at: paymentInfo.expiresAt,
+    checkout_id: paymentInfo.checkoutId,
+    checkout_url: paymentInfo.checkoutUrl,
+    checkout_status: paymentInfo.checkoutStatus,
+    reusable_clabe: true,
+    metadata: {
+      description,
+      conektaCustomerId,
+      conektaSpeiSourceId,
+      conektaOrder: order
+    }
+  });
+
+  return {
+    ...paymentInfo,
+    customerId: conektaCustomerId,
+    speiSourceId: conektaSpeiSourceId,
+    clabe: paymentInfo.clabe || conektaSpeiClabe,
+    bank: paymentInfo.bank || conektaSpeiBank
+  };
+}
+
+function renderCompactCardPage(client) {
+  const overview = buildClientOverview(client);
+  const qualification = overview.qualification;
+  const documents = overview.documents;
+  const qualificationState = qualification.complete ? "Completed" : "In progress";
+  const currentPrompt = qualification.currentQuestion || "Qualification already finished";
+  const nextDocumentLabel = documents.expectedDocument
+    ? (documents.items.find((item) => item.key === documents.expectedDocument)?.label || documents.expectedDocument)
+    : "No pending document";
+
+  const renderAnswerRows = () => qualification.answers.map((answer) => `
+    <div class="answer">
+      <div class="label">${escapeHtml(answer.label)}</div>
+      <div class="value">${escapeHtml(answer.displayValue)}</div>
+    </div>
+  `).join("");
+
+  const renderDocumentFiles = (doc) => {
+    if (!doc.files.length) {
+      return `<div class="doc-empty">${escapeHtml(doc.status === "pending" ? "Pendiente" : "Omitido")}</div>`;
+    }
+
+    return doc.files.map((file) => {
+      const fileUrl = `/dashboard/file?path=${encodeURIComponent(file.path)}`;
+      const sizeClass = doc.key === "ine_front" || doc.key === "ine_back"
+        ? "ine"
+        : (doc.key === "proof_of_address" || doc.key === "house_front" ? "large" : "compact");
+
+      if (!file.isImage) {
+        return `<a class="file-link" href="${fileUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(file.name)}</a>`;
+      }
+
+      return `
+        <img class="doc-image ${sizeClass}" src="${fileUrl}" alt="${escapeHtml(doc.label)}" />
+      `;
+    }).join("");
+  };
+
+  const renderDocuments = () => documents.items.map((doc) => `
+    <section class="doc ${escapeHtml(doc.key)}">
+      <div class="doc-title">
+        <span>${escapeHtml(doc.label)}</span>
+        <small>${escapeHtml(doc.status)}</small>
+      </div>
+      <div class="doc-files">${renderDocumentFiles(doc)}</div>
+    </section>
+  `).join("");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compact PDF Card - ${escapeHtml(overview.displayName)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 18px;
+      font-family: Arial, Helvetica, sans-serif;
+      color: #1f2933;
+      background: #f5f1eb;
+    }
+    .toolbar {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin: 0 auto 12px;
+      max-width: 980px;
+    }
+    button {
+      border: 1px solid #cdbfae;
+      background: #fff;
+      color: #4b3828;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .card {
+      max-width: 980px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #d6c9b8;
+      padding: 18px;
+    }
+    .top {
+      display: grid;
+      grid-template-columns: 1.4fr 0.9fr;
+      gap: 12px;
+      border-bottom: 1px solid #ded4c5;
+      padding-bottom: 12px;
+      margin-bottom: 12px;
+    }
+    h1, h2 {
+      margin: 0;
+      letter-spacing: 0;
+    }
+    h1 { font-size: 22px; }
+    h2 {
+      font-size: 15px;
+      margin: 12px 0 8px;
+      border-bottom: 1px solid #e7ded1;
+      padding-bottom: 5px;
+    }
+    .meta, .summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      font-size: 12px;
+    }
+    .summary {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .pill, .answer, .doc {
+      border: 1px solid #e0d5c5;
+      background: #fbfaf7;
+      padding: 8px;
+    }
+    .label {
+      font-size: 9px;
+      text-transform: uppercase;
+      color: #75624f;
+      margin-bottom: 3px;
+    }
+    .value {
+      font-size: 12px;
+      line-height: 1.3;
+      word-break: break-word;
+    }
+    .answers {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .documents {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      align-items: start;
+    }
+    .doc-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .doc-title small {
+      color: #75624f;
+      font-weight: 400;
+    }
+    .doc-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: start;
+    }
+    .doc-image {
+      display: block;
+      border: 1px solid #d6c9b8;
+      background: #fff;
+      object-fit: contain;
+    }
+    .doc-image.ine {
+      width: 280px;
+      height: 180px;
+    }
+    .doc-image.large {
+      width: 400px;
+      height: 800px;
+      max-width: 100%;
+    }
+    .doc-image.compact {
+      width: 280px;
+      height: 220px;
+    }
+    .doc-empty, .file-link {
+      font-size: 12px;
+      color: #75624f;
+    }
+    .file-link { color: #4b3828; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .toolbar { display: none; }
+      .card {
+        max-width: none;
+        margin: 0;
+        border: 0;
+        padding: 10mm;
+      }
+      .doc { break-inside: avoid; page-break-inside: avoid; }
+      .answer { break-inside: avoid; page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button type="button" onclick="window.print()">Print / Save PDF</button>
+  </div>
+  <main class="card">
+    <section class="top">
+      <div>
+        <div class="label">Applicant</div>
+        <h1>${escapeHtml(overview.displayName)}</h1>
+        <div class="value">${escapeHtml(client.wa_id)}</div>
+      </div>
+      <div class="meta">
+        <div class="pill"><div class="label">Stage</div><div class="value">${escapeHtml(client.stage || "unknown")}</div></div>
+        <div class="pill"><div class="label">Status</div><div class="value">${escapeHtml(client.status || "unknown")}</div></div>
+        <div class="pill"><div class="label">Score</div><div class="value">${escapeHtml((Number(client.score) || 0) + "/100")}</div></div>
+        <div class="pill"><div class="label">Updated</div><div class="value">${escapeHtml(client.updated_at || "")}</div></div>
+      </div>
+    </section>
+
+    <h2>Qualification summary</h2>
+    <section class="summary">
+      <div class="pill"><div class="label">Qualification</div><div class="value">${escapeHtml(qualificationState)}</div></div>
+      <div class="pill"><div class="label">Answers</div><div class="value">${escapeHtml(qualification.answeredCount + "/" + qualification.totalCount)}</div></div>
+      <div class="pill"><div class="label">Documents</div><div class="value">${escapeHtml(documents.completed + "/" + documents.total)}</div></div>
+      <div class="pill"><div class="label">Current question</div><div class="value">${escapeHtml(currentPrompt)}</div></div>
+      <div class="pill"><div class="label">Next document</div><div class="value">${escapeHtml(nextDocumentLabel)}</div></div>
+      <div class="pill"><div class="label">Quick status</div><div class="value">${escapeHtml(overview.quickStatus)}</div></div>
+    </section>
+
+    <h2>Answers</h2>
+    <section class="answers">${renderAnswerRows()}</section>
+
+    <h2>Documents</h2>
+    <section class="documents">${renderDocuments()}</section>
+  </main>
+</body>
+</html>`;
 }
 
 function renderDashboardPage() {
@@ -876,6 +1265,7 @@ function renderDashboardPage() {
               <div id="chatPills" class="pill-row"></div>
             </div>
             <div class="detail-actions">
+              <button id="compactPdfBtn" class="button" type="button">Compact PDF</button>
               <button id="jumpCompletedBtn" class="button" type="button">Next completed</button>
               <button id="jumpIncompleteBtn" class="button" type="button">Next incomplete</button>
             </div>
@@ -914,6 +1304,7 @@ function renderDashboardPage() {
     const chatPillsEl = document.getElementById("chatPills");
     const clientSearchEl = document.getElementById("clientSearch");
     const refreshBtnEl = document.getElementById("refreshBtn");
+    const compactPdfBtnEl = document.getElementById("compactPdfBtn");
     const jumpCompletedBtnEl = document.getElementById("jumpCompletedBtn");
     const jumpIncompleteBtnEl = document.getElementById("jumpIncompleteBtn");
 
@@ -1349,6 +1740,11 @@ function renderDashboardPage() {
       });
     });
 
+    compactPdfBtnEl.addEventListener("click", () => {
+      if (!state.selectedClientId) return;
+      window.open("/dashboard/clients/" + encodeURIComponent(state.selectedClientId) + "/compact-card.pdf", "_blank", "noopener,noreferrer");
+    });
+
     jumpCompletedBtnEl.addEventListener("click", () => cycleQueue(isCompletedQualification));
     jumpIncompleteBtnEl.addEventListener("click", () => cycleQueue(isIncompleteQualification));
 
@@ -1357,6 +1753,85 @@ function renderDashboardPage() {
       clientListEl.innerHTML = '<div class="empty"><strong>Could not load clients</strong>Check the server console for details.</div>';
     });
   </script>
+</body>
+</html>`;
+}
+
+function renderErpPage() {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wabot ERP</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #1f2933; background: #f4f6f8; }
+    header { padding: 18px 24px; border-bottom: 1px solid #d9e0e7; background: #fff; display: flex; justify-content: space-between; gap: 16px; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 22px; }
+    .muted { color: #64748b; font-size: 13px; margin-top: 4px; }
+    main { padding: 20px 24px; display: grid; grid-template-columns: 220px 1fr; gap: 18px; }
+    nav, section { background: #fff; border: 1px solid #d9e0e7; border-radius: 8px; }
+    nav { padding: 10px; height: fit-content; }
+    .nav-item { padding: 10px; border-radius: 6px; font-size: 14px; color: #334155; }
+    .nav-item.active { background: #e8f0fe; color: #174ea6; font-weight: 700; }
+    section { padding: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 18px; }
+    .card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #fbfdff; }
+    .label { font-size: 11px; text-transform: uppercase; color: #64748b; }
+    .value { font-size: 24px; margin-top: 6px; font-weight: 700; }
+    .table { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+    .row { display: grid; grid-template-columns: 1.1fr 0.8fr 0.8fr 0.9fr 0.8fr; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
+    .row.head { background: #f8fafc; color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700; }
+    .row:last-child { border-bottom: 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Wabot ERP</h1>
+      <p class="muted">Cartera, cuentas activas, pagos, conciliacion y cobranza.</p>
+    </div>
+    <p class="muted">Modo inicial: estructura base</p>
+  </header>
+  <main>
+    <nav>
+      <div class="nav-item active">Resumen</div>
+      <div class="nav-item">Solicitudes aprobadas</div>
+      <div class="nav-item">Cuentas activas</div>
+      <div class="nav-item">Pagos de hoy</div>
+      <div class="nav-item">Conciliacion Conekta</div>
+      <div class="nav-item">Atrasos</div>
+      <div class="nav-item">Reportes</div>
+    </nav>
+    <section>
+      <h2>Centro diario de operacion</h2>
+      <p class="muted">Este panel va separado del dashboard de conversaciones. Aqui viviran prestamos, pagos y cartera.</p>
+      <div class="grid">
+        <div class="card"><div class="label">Pagos hoy</div><div class="value">0</div></div>
+        <div class="card"><div class="label">Por conciliar</div><div class="value">0</div></div>
+        <div class="card"><div class="label">Atrasados</div><div class="value">0</div></div>
+        <div class="card"><div class="label">Cuentas activas</div><div class="value">0</div></div>
+      </div>
+      <div class="table">
+        <div class="row head">
+          <div>Cliente</div>
+          <div>Prestamo</div>
+          <div>Proximo pago</div>
+          <div>Estado</div>
+          <div>Accion</div>
+        </div>
+        <div class="row">
+          <div>Sin datos todavia</div>
+          <div>-</div>
+          <div>-</div>
+          <div>Esperando modelo de cuentas</div>
+          <div>-</div>
+        </div>
+      </div>
+    </section>
+  </main>
 </body>
 </html>`;
 }
@@ -1377,7 +1852,17 @@ async function handleIncomingText(from, text, profileName, messageId) {
     wa_message_id: messageId
   });
 
-  if (String(text || "").trim() === CONFIG.LOCAL_AI_HEALTHCHECK_TOKEN) {
+  const normalizedText = String(text || "").trim();
+  const advisorOnly = from === CONFIG.ADVISOR_PHONE;
+
+  if (advisorOnly && normalizedText.toLowerCase().startsWith("admin insight")) {
+    const question = normalizedText.replace(/^admin insight\b[:\s-]*/i, "");
+    const insight = await generateAdvisorInsight({ advisorWaId: from, question });
+    await sendTextMessage(from, insight);
+    return;
+  }
+
+  if (normalizedText === CONFIG.LOCAL_AI_HEALTHCHECK_TOKEN) {
     const diagnostic = await diagnoseLocalAi();
     const status = diagnostic.ok ? "OK" : "FAIL";
     const lines = [
@@ -1607,8 +2092,147 @@ async function handleIncomingMedia(from, profileName, messageId, type, mediaId, 
 // =========================
 // WEBHOOK ENDPOINTS
 // =========================
+function summarizeWebhookPayload(body) {
+  const entries = Array.isArray(body?.entry) ? body.entry : [];
+  let messages = 0;
+  let statuses = 0;
+
+  for (const entry of entries) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    for (const change of changes) {
+      messages += Array.isArray(change.value?.messages) ? change.value.messages.length : 0;
+      statuses += Array.isArray(change.value?.statuses) ? change.value.statuses.length : 0;
+    }
+  }
+
+  return { entries: entries.length, messages, statuses };
+}
+
+app.get("/privacy", (req, res) => {
+  res.type("html").send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Politica de privacidad</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      color: #1f2933;
+      background: #f7f7f4;
+      line-height: 1.55;
+    }
+    main {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 40px 20px 56px;
+      background: #ffffff;
+      min-height: 100vh;
+    }
+    h1 { margin-top: 0; font-size: 32px; }
+    h2 { margin-top: 28px; font-size: 20px; }
+    p, li { font-size: 16px; }
+    .updated { color: #5d6b78; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Politica de privacidad</h1>
+    <p class="updated">Ultima actualizacion: 28 de abril de 2026</p>
+
+    <p>Esta politica describe como se maneja la informacion recibida por WhatsApp para dar seguimiento a solicitudes de prestamo y atencion relacionada.</p>
+
+    <h2>Informacion que recopilamos</h2>
+    <p>Podemos recopilar informacion que la persona solicitante envia por WhatsApp, incluyendo nombre, numero de telefono, respuestas del formulario, documentos o imagenes requeridas para revisar la solicitud, y mensajes relacionados con el tramite.</p>
+
+    <h2>Uso de la informacion</h2>
+    <p>Usamos la informacion solo para continuar la conversacion de la persona solicitante, revisar su solicitud, solicitar documentos faltantes, dar seguimiento operativo y permitir que un asesor atienda el caso.</p>
+
+    <h2>Comparticion de informacion</h2>
+    <p>No vendemos informacion personal. La informacion puede ser revisada por asesores autorizados para atender la solicitud. Tambien puede procesarse mediante servicios tecnicos necesarios para operar WhatsApp, almacenamiento, seguridad y comunicacion.</p>
+
+    <h2>Conservacion y seguridad</h2>
+    <p>Conservamos la informacion durante el tiempo necesario para operar el tramite, dar seguimiento y cumplir obligaciones aplicables. Aplicamos medidas razonables para proteger la informacion y limitar el acceso a personal autorizado.</p>
+
+    <h2>Derechos y contacto</h2>
+    <p>La persona solicitante puede pedir correccion, actualizacion o eliminacion de su informacion enviando un mensaje al mismo canal de WhatsApp por el que inicio el tramite.</p>
+
+    <h2>Datos sensibles</h2>
+    <p>No solicitamos contrasenas, codigos de verificacion, numeros completos de tarjeta, ni credenciales de acceso. Si recibe una solicitud de ese tipo, no comparta esa informacion.</p>
+  </main>
+</body>
+</html>`);
+});
+
 app.get("/dashboard", (req, res) => {
   res.type("html").send(renderDashboardPage());
+});
+
+app.get("/erp", (req, res) => {
+  res.type("html").send(renderErpPage());
+});
+
+app.get("/dashboard/clients/:waId/compact-card", async (req, res) => {
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) {
+      return res.status(404).send("Client not found");
+    }
+
+    return res.type("html").send(renderCompactCardPage(client));
+  } catch (error) {
+    console.error("Compact card page error:", error);
+    return res.status(500).send("Failed to render compact card");
+  }
+});
+
+app.get("/dashboard/clients/:waId/compact-card.pdf", async (req, res) => {
+  let browser = null;
+
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) {
+      return res.status(404).send("Client not found");
+    }
+
+    const puppeteer = require("puppeteer");
+    const fileBaseName = String(client.full_name || client.profile_name || client.wa_id || "applicant")
+      .replace(/[^\w.-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 80) || "applicant";
+    const url = `http://127.0.0.1:${CONFIG.PORT}/dashboard/clients/${encodeURIComponent(req.params.waId)}/compact-card`;
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
+
+    const pdf = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: {
+        top: "8mm",
+        right: "8mm",
+        bottom: "8mm",
+        left: "8mm"
+      }
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileBaseName}-compact-card.pdf"`);
+    return res.send(pdf);
+  } catch (error) {
+    console.error("Compact PDF error:", error.message || error);
+    return res.status(500).send("Failed to generate compact PDF");
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
 });
 
 app.get("/dashboard/api/clients", async (req, res) => {
@@ -1637,6 +2261,106 @@ app.get("/dashboard/api/clients/:waId", async (req, res) => {
   } catch (error) {
     console.error("Dashboard conversation error:", error);
     res.status(500).json({ error: "Failed to load conversation" });
+  }
+});
+
+app.post("/dashboard/api/clients/:waId/conekta/spei-order", async (req, res) => {
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    const amountCents = parseAmountToCents(req.body?.amount);
+    if (!amountCents) {
+      return res.status(400).json({ error: "Amount is required" });
+    }
+
+    const paymentInfo = await createConektaSpeiPaymentForClient(
+      client,
+      amountCents,
+      req.body?.description || "Pago semanal"
+    );
+
+    return res.json({
+      ok: true,
+      payment: paymentInfo,
+      message: paymentInfo.clabe
+        ? `Orden SPEI recurrente generada por ${formatCurrencyFromCents(paymentInfo.amountCents, paymentInfo.currency)} a CLABE ${paymentInfo.clabe}`
+        : "Orden SPEI recurrente generada, pero Conekta no devolvio CLABE recurrente"
+    });
+  } catch (error) {
+    const summary = summarizeConektaError(error);
+    console.error("Conekta SPEI order error:", summary);
+    return res.status(500).json({ error: summary.message || "Failed to create Conekta SPEI order" });
+  }
+});
+
+app.post("/payments/conekta/webhook", async (req, res) => {
+  try {
+    const signature = verifyConektaWebhookSignature(req);
+    if (!signature.ok) {
+      console.warn("Conekta webhook rejected:", signature.reason);
+      return res.status(401).json({ error: "Invalid Conekta webhook signature" });
+    }
+
+    const event = req.body || {};
+    const type = event.type;
+    const order = event.data?.object;
+
+    if (!event.id || !type || !order?.id) {
+      return res.status(400).json({ error: "Invalid Conekta webhook payload" });
+    }
+
+    if (type !== "order.paid") {
+      await savePaymentTransaction({
+        provider: "conekta",
+        provider_event_id: event.id,
+        provider_order_id: order.id,
+        status: `ignored:${type}`,
+        raw_payload: event
+      });
+      return res.json({ ok: true, ignored: type });
+    }
+
+    const paymentInfo = extractSpeiPaymentInfo(order);
+    const paymentOrder = await getPaymentOrderByProviderOrderId("conekta", order.id);
+    const inserted = await savePaymentTransaction({
+      provider: "conekta",
+      provider_event_id: event.id,
+      provider_order_id: paymentInfo.orderId,
+      provider_charge_id: paymentInfo.chargeId,
+      wa_id: paymentOrder?.wa_id || order.metadata?.wa_id || null,
+      amount_cents: paymentInfo.amountCents,
+      currency: paymentInfo.currency,
+      paid_at: paymentInfo.paidAt,
+      status: paymentOrder ? "applied_to_order" : "unmatched_order",
+      raw_payload: event
+    });
+
+    if (paymentOrder) {
+      await markPaymentOrderPaid("conekta", order.id, {
+        provider_charge_id: paymentInfo.chargeId,
+        amount_cents: paymentInfo.amountCents,
+        currency: paymentInfo.currency
+      });
+
+      if (inserted && paymentOrder.wa_id) {
+        await sendTextMessage(
+          paymentOrder.wa_id,
+          `Pago recibido por ${formatCurrencyFromCents(paymentInfo.amountCents, paymentInfo.currency)}. Gracias, ya quedó registrado.`
+        );
+      }
+    }
+
+    return res.json({
+      ok: true,
+      matched: Boolean(paymentOrder),
+      duplicate: !inserted
+    });
+  } catch (error) {
+    console.error("Conekta webhook error:", error.message || error);
+    return res.status(500).json({ error: "Failed to process Conekta webhook" });
   }
 });
 
@@ -1719,11 +2443,15 @@ app.post("/webhook", async (req, res) => {
 
   try {
     const body = req.body;
+    const summary = summarizeWebhookPayload(body);
+    console.log(
+      `[webhook] received object=${body?.object || "(missing)"} entries=${summary.entries} messages=${summary.messages} statuses=${summary.statuses}`
+    );
 
     if (body.object !== "whatsapp_business_account") return;
 
-    for (const entry of body.entry) {
-      for (const change of entry.changes) {
+    for (const entry of Array.isArray(body.entry) ? body.entry : []) {
+      for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
         if (change.field !== "messages") continue;
 
         const messages = Array.isArray(change.value?.messages)
@@ -1740,6 +2468,7 @@ app.post("/webhook", async (req, res) => {
             const text = message.text.body;
             const profileName = change.value.contacts?.[0]?.profile?.name;
 
+            console.log(`[webhook] text from=${from} id=${messageId}`);
             await handleIncomingText(from, text, profileName, messageId);
 
           } else if (["image", "document", "video"].includes(message.type)) {
@@ -1755,7 +2484,10 @@ app.post("/webhook", async (req, res) => {
               extension = extMatch ? extMatch[1] : "pdf";
             } else if (message.type === "video") extension = "mp4";
 
+            console.log(`[webhook] ${message.type} from=${from} id=${messageId}`);
             await handleIncomingMedia(from, profileName, messageId, message.type, mediaId, extension);
+          } else {
+            console.log(`[webhook] ignored type=${message.type || "(missing)"} from=${from} id=${messageId}`);
           }
         }
       }

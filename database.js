@@ -5,6 +5,44 @@ const fs = require("fs");
 if (!fs.existsSync("./data")) fs.mkdirSync("./data", { recursive: true });
 const db = new sqlite3.Database("./data/bot.db");
 
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS payment_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wa_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_order_id TEXT NOT NULL UNIQUE,
+      provider_charge_id TEXT,
+      amount_cents INTEGER NOT NULL,
+      currency TEXT DEFAULT 'MXN',
+      status TEXT DEFAULT 'pending',
+      clabe TEXT,
+      bank TEXT,
+      expires_at INTEGER,
+      metadata TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS payment_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      provider_event_id TEXT NOT NULL UNIQUE,
+      provider_order_id TEXT,
+      provider_charge_id TEXT,
+      wa_id TEXT,
+      amount_cents INTEGER,
+      currency TEXT DEFAULT 'MXN',
+      paid_at INTEGER,
+      status TEXT DEFAULT 'received',
+      raw_payload TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+});
+
 db.all(`PRAGMA table_info(clients)`, (err, rows) => {
   if (err) {
     console.error("Error loading client schema:", err);
@@ -23,12 +61,37 @@ db.all(`PRAGMA table_info(clients)`, (err, rows) => {
     { name: "income_frequency", sql: "TEXT" },
     { name: "extra_household_income_available", sql: "TEXT" },
     { name: "extra_household_income_details", sql: "TEXT" },
-    { name: "current_debt_payments", sql: "TEXT" }
+    { name: "current_debt_payments", sql: "TEXT" },
+    { name: "conekta_customer_id", sql: "TEXT" },
+    { name: "conekta_spei_source_id", sql: "TEXT" },
+    { name: "conekta_spei_clabe", sql: "TEXT" },
+    { name: "conekta_spei_bank", sql: "TEXT" }
   ];
 
   for (const column of expectedColumns) {
     if (!existingColumns.includes(column.name)) {
       db.run(`ALTER TABLE clients ADD COLUMN ${column.name} ${column.sql}`);
+    }
+  }
+});
+
+db.all(`PRAGMA table_info(payment_orders)`, (err, rows) => {
+  if (err) {
+    console.error("Error loading payment_orders schema:", err);
+    return;
+  }
+
+  const existingColumns = rows.map((row) => row.name);
+  const expectedColumns = [
+    { name: "checkout_id", sql: "TEXT" },
+    { name: "checkout_url", sql: "TEXT" },
+    { name: "checkout_status", sql: "TEXT" },
+    { name: "reusable_clabe", sql: "INTEGER DEFAULT 0" }
+  ];
+
+  for (const column of expectedColumns) {
+    if (!existingColumns.includes(column.name)) {
+      db.run(`ALTER TABLE payment_orders ADD COLUMN ${column.name} ${column.sql}`);
     }
   }
 });
@@ -260,6 +323,115 @@ function markNotInterested(wa_id) {
   });
 }
 
+function createPaymentOrder(order) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO payment_orders
+        (wa_id, provider, provider_order_id, provider_charge_id, amount_cents, currency, status, clabe, bank, expires_at, checkout_id, checkout_url, checkout_status, reusable_clabe, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(provider_order_id) DO UPDATE SET
+        provider_charge_id = excluded.provider_charge_id,
+        amount_cents = excluded.amount_cents,
+        currency = excluded.currency,
+        status = excluded.status,
+        clabe = excluded.clabe,
+        bank = excluded.bank,
+        expires_at = excluded.expires_at,
+        checkout_id = excluded.checkout_id,
+        checkout_url = excluded.checkout_url,
+        checkout_status = excluded.checkout_status,
+        reusable_clabe = excluded.reusable_clabe,
+        metadata = excluded.metadata,
+        updated_at = CURRENT_TIMESTAMP`,
+      [
+        order.wa_id,
+        order.provider,
+        order.provider_order_id,
+        order.provider_charge_id || null,
+        order.amount_cents,
+        order.currency || "MXN",
+        order.status || "pending",
+        order.clabe || null,
+        order.bank || null,
+        order.expires_at || null,
+        order.checkout_id || null,
+        order.checkout_url || null,
+        order.checkout_status || null,
+        order.reusable_clabe ? 1 : 0,
+        order.metadata ? JSON.stringify(order.metadata) : null
+      ],
+      function (err) {
+        if (err) reject(err);
+        else resolve(true);
+      }
+    );
+  });
+}
+
+function getPaymentOrderByProviderOrderId(provider, providerOrderId) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT * FROM payment_orders WHERE provider = ? AND provider_order_id = ?`,
+      [provider, providerOrderId],
+      (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      }
+    );
+  });
+}
+
+function markPaymentOrderPaid(provider, providerOrderId, updates = {}) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `UPDATE payment_orders
+       SET status = 'paid',
+           provider_charge_id = COALESCE(?, provider_charge_id),
+           amount_cents = COALESCE(?, amount_cents),
+           currency = COALESCE(?, currency),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE provider = ? AND provider_order_id = ?`,
+      [
+        updates.provider_charge_id || null,
+        updates.amount_cents || null,
+        updates.currency || null,
+        provider,
+        providerOrderId
+      ],
+      function (err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      }
+    );
+  });
+}
+
+function savePaymentTransaction(transaction) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT OR IGNORE INTO payment_transactions
+        (provider, provider_event_id, provider_order_id, provider_charge_id, wa_id, amount_cents, currency, paid_at, status, raw_payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        transaction.provider,
+        transaction.provider_event_id,
+        transaction.provider_order_id || null,
+        transaction.provider_charge_id || null,
+        transaction.wa_id || null,
+        transaction.amount_cents || null,
+        transaction.currency || "MXN",
+        transaction.paid_at || null,
+        transaction.status || "received",
+        transaction.raw_payload ? JSON.stringify(transaction.raw_payload) : null
+      ],
+      function (err) {
+        if (err) reject(err);
+        else resolve(this.changes > 0);
+      }
+    );
+  });
+}
+
 function closeDatabase() {
   return new Promise((resolve) => {
     db.close((err) => {
@@ -282,5 +454,9 @@ module.exports = {
   startQualificationFlow,
   moveToDocumentsStage,
   markNotInterested,
+  createPaymentOrder,
+  getPaymentOrderByProviderOrderId,
+  markPaymentOrderPaid,
+  savePaymentTransaction,
   closeDatabase
 };

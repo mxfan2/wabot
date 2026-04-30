@@ -1,5 +1,4 @@
 # Changelog
-
 ## 2026-04-17 22:30:19 - Backup and Change Tracking
 - Added this `CHANGELOG.md` to document future project changes.
 - Created a backup snapshot in `backups/20260417-223019/` before further modifications.
@@ -112,3 +111,217 @@
 - Created a backup snapshot in `backups/20260425-021254/` before adding the age restriction.
 - Added an age gate in the qualification flow: age 17 or below closes the application with `status = underage`; age 18 or above continues normally.
 - Added a short underage closure message in `config.js`.
+
+## 2026-04-30 - WhatsApp Bot Stabilization, Dashboard PDF, ERP Shell, and Conekta Recurrent SPEI by CODEX
+- Updated the active workspace to `C:\Users\caval\wabot` after the project folder was renamed from earlier backup-style paths.
+- Added webhook visibility in `server.js` so inbound WhatsApp payloads log object type, entry/message/status counts, message type, sender, and message id without exposing secrets.
+- Added `/privacy` and `privacy.html` for Meta app publishing requirements.
+- Updated the initial menu message in `config.js` to the newer quick-loan copy:
+  - thanks the user for contacting,
+  - mentions fast loans without pawn,
+  - gives the `$3,000` / `10 weeks` / `$450 weekly` example,
+  - invites the applicant to discover qualification through simple questions.
+- Added safer WhatsApp Graph sending in `whatsapp.js`:
+  - configurable timeout via `WHATSAPP_SEND_TIMEOUT_MS`,
+  - configurable retry count via `WHATSAPP_SEND_RETRIES`,
+  - retry handling for transient network/API failures,
+  - sanitized Axios error summaries so logs do not dump authorization headers.
+- Fixed duplicate server startup confusion by checking and restarting the process listening on port `3001`.
+- Confirmed webhook health with `npm run test:webhook` after restarts.
+
+### Local AI and Chat Naturalness
+- Updated launcher behavior in `start-all.bat` and `start-bot.bat` so Ollama/local AI is warmed before the bot starts and duplicate listeners are detected.
+- Added and wired additional AI grounding files:
+  - `ai/code-of-conduct.md`
+  - `ai/privacy.md`
+- Expanded `aiOperator.js` with personalized context from database state and recent conversation history.
+- Added advisor-only insight command support through `admin insight ...`, gated to `ADVISOR_PHONE`.
+- Added local AI thinking controls:
+  - `LOCAL_AI_THINK`
+  - `LOCAL_AI_ADMIN_THINK`
+- Disabled thinking for normal applicant replies after `qwen2.5:3b` returned Ollama/OpenAI-compatible `400` errors when `think/reasoning_effort` was enabled.
+- Updated AI request construction so `think` and `reasoning_effort` are omitted entirely when disabled.
+- Added `<think>...</think>` stripping for model responses before JSON parsing.
+- Changed `.env` runtime defaults during testing to use:
+  - `LOCAL_AI_MODEL=qwen2.5:3b`
+  - `LOCAL_AI_TEMPERATURE=0.35`
+  - `LOCAL_AI_THINK=false`
+- Added contradiction guards so AI replies cannot ask for "si o no" when the current question expects another answer type, such as address or marital status.
+- Reduced AI control over qualification questions after it generated an invalid prompt like "Como puedo ayudarte con la direccion de tu domicilio?"
+- Changed `flow.js` so actual form questions are now sent from deterministic question text, with only small deterministic transition prefixes. AI can still help with clarifications and validation errors, but it no longer rewrites core form questions.
+
+### Qualification Flow and Validation Fixes
+- Fixed validation type mismatches:
+  - `q2_age` now validates with `age`.
+  - `q11_average_income` now validates with `income_amount`.
+- Tightened `utils.js` validation for:
+  - age,
+  - income amount,
+  - address,
+  - time period,
+  - debt payment amount,
+  - placeholder/fake answers,
+  - repeated digit spam.
+- Relaxed address validation enough to accept realistic short references such as `Av 12 y calzada`, while still rejecting fake answers like `es privado 666`.
+- Added `sendHumanizedQuestion()` in `flow.js`, later restricted to deterministic question text for safety.
+- Added `asksToRepeatQuestion()` and `repeatCurrentQuestion()` so users can ask "que pregunta", "cual era la pregunta", "repite", or "no entendi" and get the exact current question again.
+- Added recovery for pending restart confirmations when users ask what question they were on, allowing the bot to return to the saved application step instead of looping on restart confirmation.
+- Reprocessed a stuck test conversation so `Av 12 y calzada` was saved as `work_address` and the user advanced to the next step.
+- Corrected a live invalid AI-generated question by resending the exact prompt `Cual es la direccion de tu domicilio?`.
+- Created `preguntas-formulario.txt` containing only the current form questions for external review.
+
+### Dashboard and Compact PDF Card
+- Added a compact printable/PDF applicant card in `server.js`:
+  - `GET /dashboard/clients/:waId/compact-card`
+  - `GET /dashboard/clients/:waId/compact-card.pdf`
+- Installed `puppeteer` and added it to `package.json` / `package-lock.json` for server-side PDF generation.
+- Added a **Compact PDF** button to the existing dashboard applicant detail header.
+- Compact PDF includes:
+  - applicant header,
+  - qualification summary,
+  - all stored answers,
+  - document images,
+  - no conversation history.
+- PDF image sizing:
+  - INE front/back: `280 x 180`,
+  - comprobante de domicilio: approx. `400 x 800`,
+  - fachada del domicilio: approx. `400 x 800`,
+  - other images use a compact preview size.
+- Verified PDF generation returns `application/pdf` and that webhook tests still pass after adding Puppeteer.
+
+### ERP Planning and Initial Shell
+- Added initial `/erp` route in `server.js` as a separate operations surface from the conversation dashboard.
+- ERP shell currently includes planned navigation for:
+  - Resumen,
+  - Solicitudes aprobadas,
+  - Cuentas activas,
+  - Pagos de hoy,
+  - Conciliacion Conekta,
+  - Atrasos,
+  - Reportes.
+- ERP design direction:
+  - dashboard remains for conversations, applications, documents, and applicant review;
+  - ERP will own loans, active accounts, payment schedules, payment reconciliation, overdue accounts, and reporting.
+- Documented intended procedure:
+  - approve application,
+  - create loan/account,
+  - create Conekta customer and recurrent SPEI payment source,
+  - issue payment CLABE/ficha,
+  - receive Conekta webhook,
+  - match payment to order/loan/installment,
+  - apply payment,
+  - update balance,
+  - send receipt by WhatsApp.
+
+### Conekta Integration
+- Added `conekta.js` for Conekta API operations.
+- Added Conekta configuration in `config.js`:
+  - `CONEKTA_ENABLED`
+  - `CONEKTA_API_KEY`
+  - `CONEKTA_API_BASE_URL`
+  - `CONEKTA_API_VERSION`
+  - `CONEKTA_DEFAULT_EMAIL`
+  - `CONEKTA_WEBHOOK_SECRET`
+  - `CONEKTA_WEBHOOK_PUBLIC_KEY`
+- Replaced the initial one-off SPEI assumption with the documented Conekta recurrent SPEI flow:
+  - create customer,
+  - create `payment_source` with `type: "spei_recurrent"`,
+  - store reusable CLABE/reference and bank,
+  - create orders using `reuse_customer_clabe: true`,
+  - use Checkout integration metadata/url where returned.
+- Added Conekta helper functions:
+  - `createCustomer()`
+  - `createSpeiRecurrentPaymentSource()`
+  - `createReusableClabeOrder()`
+  - `extractSpeiPaymentInfo()`
+  - `extractCheckoutInfo()`
+  - `summarizeConektaError()`
+- Added database fields on `clients` for Conekta linkage:
+  - `conekta_customer_id`
+  - `conekta_spei_source_id`
+  - `conekta_spei_clabe`
+  - `conekta_spei_bank`
+- Added payment tables in `database.js`:
+  - `payment_orders`
+  - `payment_transactions`
+- Added schema migration support for `payment_orders` fields:
+  - `checkout_id`
+  - `checkout_url`
+  - `checkout_status`
+  - `reusable_clabe`
+- Added database helpers:
+  - `createPaymentOrder()`
+  - `getPaymentOrderByProviderOrderId()`
+  - `markPaymentOrderPaid()`
+  - `savePaymentTransaction()`
+- Added route to create a Conekta recurrent SPEI order for an existing client:
+  - `POST /dashboard/api/clients/:waId/conekta/spei-order`
+- Added Conekta webhook route:
+  - `POST /payments/conekta/webhook`
+- Webhook handling currently:
+  - verifies signature,
+  - stores ignored events for audit,
+  - processes `order.paid`,
+  - attempts to match by stored `provider_order_id`,
+  - marks matched orders as paid,
+  - stores unmatched paid orders as `unmatched_order`,
+  - sends WhatsApp receipt for matched orders with a known `wa_id`.
+- Confirmed the first provided Conekta key was a public tokenization key and caused `401 Acceso no autorizado`.
+- Replaced it in `.env` with the private test API key provided later.
+- Successfully tested the private key:
+  - customer creation succeeded,
+  - `spei_recurrent` payment source creation succeeded,
+  - reusable CLABE was returned,
+  - order with `reuse_customer_clabe: true` was created,
+  - checkout id/url were present,
+  - `charges` can be absent initially, which matches Conekta's recurrent SPEI behavior.
+- Added Conekta webhook signature verification:
+  - captures raw webhook body using `express.json({ verify })`,
+  - stores the public webhook key in `CONEKTA_WEBHOOK_PUBLIC_KEY`,
+  - formats single-line PEM values back into valid PEM,
+  - verifies `DIGEST` header with RSA-SHA256,
+  - rejects unsigned/invalid webhook calls with `401`.
+- Verified unsigned fake webhook is rejected.
+- Verified real Conekta signed events were received and stored.
+- Observed test payments received from Conekta:
+  - `order.paid` SPEI event for `$750.00 MXN`,
+  - related `charge.created`, `charge.paid`, `order.created`, and `order.pending_payment` events.
+- The test payment was stored as `unmatched_order` because it was created outside Wabot/ERP and did not match any stored `payment_orders.provider_order_id`, `wa_id`, `loan_id`, or `installment_id`.
+- Identified that future ERP-generated payment orders must include metadata such as:
+  - `wa_id`,
+  - `loan_id`,
+  - `installment_id`,
+  - Conekta customer id,
+  - recurrent CLABE/source id.
+
+### Known Current Gaps / Next Work
+- Build real ERP loan models:
+  - `loans`,
+  - `payment_schedule`,
+  - formal balance tracking,
+  - overdue states,
+  - payment application rules.
+- Add ERP UI flows:
+  - approve application,
+  - create active loan,
+  - generate payment schedule,
+  - create Conekta recurrent SPEI setup,
+  - send CLABE/ficha to client,
+  - view active account.
+- Improve payment matching:
+  - match by stored order id first,
+  - then by metadata,
+  - then by Conekta customer id,
+  - then by recurrent CLABE,
+  - send low-confidence matches to an "unmatched payments" queue.
+- Implement automatic application of matched payments to the oldest due installment, with support for partial payments, overpayments, and credit balance.
+- Add daily reconciliation job against Conekta so missed webhooks can be recovered.
+- Add ERP queues:
+  - pagos de hoy,
+  - pagos vencidos,
+  - pagos recibidos,
+  - pagos no identificados,
+  - cuentas al corriente,
+  - cuentas atrasadas.
+- Add WhatsApp receipt and payment status messages once loans/payment schedules exist.
+- Add dashboard/ERP controls for resending current question, correcting current step, and reviewing stuck chatbot conversations.

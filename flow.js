@@ -39,7 +39,7 @@ const QUESTION_FLOW = [
     step: "q2_age",
     field: "age",
     question: "¿Qué edad tienes?",
-    validationType: "numeric"
+    validationType: "age"
   },
   {
     step: "q3_personal_phone_confirmed",
@@ -112,7 +112,7 @@ const QUESTION_FLOW = [
     step: "q11_average_income",
     field: "average_income",
     question: "¿Cuánto ganas aproximadamente?",
-    validationType: "numeric"
+    validationType: "income_amount"
   },
   {
     step: "q11b_income_frequency",
@@ -192,23 +192,79 @@ function isSkipCommand(text) {
 function isDoneCommand(text) {
   return exactKeywordMatch(text, KEYWORDS.DONE) || fuzzyMatch(text, KEYWORDS.DONE, 1);
 }
+
+function asksToRepeatQuestion(text) {
+  const clean = normalizeText(text);
+  return [
+    "que pregunta",
+    "qué pregunta",
+    "cual pregunta",
+    "cuál pregunta",
+    "cual era la pregunta",
+    "cuál era la pregunta",
+    "repite",
+    "repitela",
+    "repítela",
+    "no entendi",
+    "no entendí"
+  ].some((phrase) => clean.includes(phrase));
+}
+
+async function repeatCurrentQuestion(to, client, userText = "") {
+  const currentIndex = getQuestionIndexByStep(client?.question_step);
+  const currentQuestion = QUESTION_FLOW[currentIndex];
+
+  if (!currentQuestion) {
+    await sendTextMessage(to, "No encontré una pregunta pendiente. Escribe *estado* y revisamos dónde vas.");
+    return;
+  }
+
+  const prefix = userText ? "Claro, te la repito:" : "Seguimos con esta pregunta:";
+  await sendTextMessage(to, `${prefix}\n\n${buildQuestionMessage(currentQuestion)}`);
+}
 // =========================
 // QUESTION SENDER (OPTIMIZED)
 // =========================
+function buildQuestionMessage(question, prefix = "") {
+  const parts = [];
+
+  if (prefix) parts.push(prefix);
+  if (question.preMessage) parts.push(question.preMessage);
+  parts.push(question.question);
+
+  if (OPTIONAL_QUESTION_STEPS.has(question.step)) {
+    parts.push("Si no cuentas con ese dato, escribe *omitir*.");
+  }
+
+  return parts.filter(Boolean).join("\n\n");
+}
+
+function buildQuestionPrefix(context = {}) {
+  if (!context.previousQuestionStep) return "";
+
+  const normalizedAnswer = normalizeText(context.interpretedAnswer || context.userText || "");
+
+  if (normalizedAnswer === "omitir") return "Listo, lo dejamos omitido.";
+  if (context.previousQuestionStep === "q5_debt_with_lender") return "Gracias por responder con confianza.";
+  if (context.previousQuestionStep === "q6b_income_type") return "Perfecto, entendido.";
+  if (context.previousQuestionStep === "q8_work_address") return "Listo, ya tengo la dirección del trabajo.";
+  if (context.previousQuestionStep === "q8b_work_phone") return "Listo, seguimos.";
+
+  return "Listo, gracias.";
+}
+
 async function sendQuestionByIndex(to, index) {
   const question = QUESTION_FLOW[index];
   if (!question) return;
 
-  if (question.preMessage) {
-    await sendTextMessage(to, question.preMessage);
-  }
+  await sendTextMessage(to, buildQuestionMessage(question));
+}
 
-  await sendTextMessage(to, question.question);
+async function sendHumanizedQuestion(to, index, context = {}) {
+  const question = QUESTION_FLOW[index];
+  if (!question) return;
 
-  // Solo algunas preguntas permiten omitir explícitamente
-  if (OPTIONAL_QUESTION_STEPS.has(question.step)) {
-    await sendTextMessage(to, "Si no cuentas con ese dato, escribe *omitir*.");
-  }
+  await sendTextMessage(to, buildQuestionMessage(question, buildQuestionPrefix(context)));
 }
 
 // =========================
@@ -305,16 +361,12 @@ async function handleQualificationFlow(client, text, from) {
         question_step: nextQuestion.step,
         stage: nextIndex <= 5 ? "section_1" : "section_2"
       });
-      let reply;
-      if (classified.frustrated) {
-        reply = "Tienes razón, ya quedó registrado. Seguimos con lo siguiente.";
-      } else if (classified.value === "no") {
-        reply = "Perfecto, lo registro como que no tienes adeudos pendientes en casas de préstamo.";
-      } else {
-        reply = "Entendido, lo registro. Un asesor puede revisar más detalle si hace falta.";
-      }
-      await sendTextMessage(from, reply);
-      await sendQuestionByIndex(from, nextIndex);
+      await sendHumanizedQuestion(from, nextIndex, {
+        stage: nextIndex <= 5 ? "section_1" : "section_2",
+        previousQuestionStep: currentQuestion.step,
+        userText: text,
+        interpretedAnswer: debtValue
+      });
       return true;
     }
   }
@@ -333,22 +385,12 @@ async function handleQualificationFlow(client, text, from) {
         question_step: nextQuestion.step,
         stage: "section_2"
       });
-      let reply;
-      if (classified.value === "negocio_propio") {
-        reply = classified.extra.business_type ? `Perfecto, entonces tu ingreso viene de tu negocio propio: ${classified.extra.business_type}.` : "Perfecto, entonces tu ingreso viene de tu negocio propio.";
-      } else if (classified.value === "empleo") {
-        reply = "Perfecto, entonces tu ingreso viene de empleo.";
-      } else if (classified.value === "pension") {
-        reply = "Perfecto, entonces tu ingreso viene de pensión.";
-      } else if (classified.value === "apoyo_familiar") {
-        reply = "Perfecto, entonces tu ingreso viene de apoyo familiar.";
-      } else if (classified.value === "desempleado") {
-        reply = "Entendido, lo registro.";
-      } else {
-        reply = "Perfecto, lo registro.";
-      }
-      await sendTextMessage(from, reply);
-      await sendQuestionByIndex(from, nextIndex);
+      await sendHumanizedQuestion(from, nextIndex, {
+        stage: "section_2",
+        previousQuestionStep: currentQuestion.step,
+        userText: text,
+        interpretedAnswer: classified.value
+      });
       return true;
     }
   }
@@ -366,8 +408,21 @@ async function handleQualificationFlow(client, text, from) {
         question_step: nextQuestion.step,
         stage: "section_2"
       });
-      await sendTextMessage(from, "Perfecto, entendido.");
-      await sendQuestionByIndex(from, nextIndex);
+      await sendTextMessage(from, await draftFlexibleReply({
+        situation: "acknowledge_income_type",
+        wa_id: from,
+        stage: client.stage,
+        questionStep: currentQuestion.step,
+        userText: text,
+        interpretedIncomeType: classified.value,
+        desiredOutcome: "Confirm the income type naturally and briefly."
+      }, "Perfecto, entendido."));
+      await sendHumanizedQuestion(from, nextIndex, {
+        stage: "section_2",
+        previousQuestionStep: currentQuestion.step,
+        userText: text,
+        interpretedAnswer: classified.value
+      });
       return true;
     }
   }
@@ -376,10 +431,18 @@ async function handleQualificationFlow(client, text, from) {
   // SI EL USUARIO HACE PREGUNTA
   // =========================
   if (seemsLikeQuestion(text)) {
-    const fallbackReply = `Eso lo puede confirmar un asesor.\n\nPor ahora seguimos con esto:\n\n${currentQuestion.question}`;
+    if (asksToRepeatQuestion(text)) {
+      await repeatCurrentQuestion(from, client, text);
+      return true;
+    }
+
+    const fallbackReply = `Te ayudo, pero primero necesito esta respuesta para seguir:\n\n${currentQuestion.question}`;
 
     await sendTextMessage(from, await draftFlexibleReply({
       situation: "user_asked_question_mid_flow",
+      wa_id: from,
+      stage: client.stage,
+      questionStep: currentQuestion.step,
       currentQuestion: currentQuestion.question,
       userText: text
     }, fallbackReply));
@@ -416,12 +479,12 @@ async function handleQualificationFlow(client, text, from) {
         stage: nextIndex <= 5 ? "section_1" : "section_2"
       });
 
-      await sendTextMessage(from, await chooseApprovedReply("omitted_answer", {
-        wa_id: from,
-        questionStep: currentQuestion.step
-      }, "Listo, seguimos."));
-
-      await sendQuestionByIndex(from, nextIndex);
+      await sendHumanizedQuestion(from, nextIndex, {
+        stage: nextIndex <= 5 ? "section_1" : "section_2",
+        previousQuestionStep: currentQuestion.step,
+        userText: text,
+        interpretedAnswer: "omitir"
+      });
       return true;
     }
 
@@ -636,7 +699,11 @@ async function handleQualificationFlow(client, text, from) {
       stage: nextIndex <= 5 ? "section_1" : "section_2"
     });
 
-    await sendQuestionByIndex(from, nextIndex);
+    await sendHumanizedQuestion(from, nextIndex, {
+      stage: nextIndex <= 5 ? "section_1" : "section_2",
+      previousQuestionStep: currentQuestion.step,
+      userText: text
+    });
     return true;
   }
 
@@ -880,6 +947,13 @@ async function resolvePendingAction(client, text, from, profileName) {
   if (!client?.pending_action) return false;
 
   if (client.pending_action === "confirm_restart") {
+    if (asksToRepeatQuestion(text) && (client.stage === "section_1" || client.stage === "section_2")) {
+      await updateClient(from, { pending_action: null });
+      const refreshedClient = await getClient(from);
+      await repeatCurrentQuestion(from, refreshedClient, text);
+      return true;
+    }
+
     if (exactKeywordMatch(text, KEYWORDS.YES)) {
       await discardClientApplication(from, profileName);
 
@@ -908,7 +982,11 @@ async function resolvePendingAction(client, text, from, profileName) {
 
     await sendTextMessage(from, await chooseApprovedReply("invalid_restart_confirmation", {
       wa_id: from,
-      userText: text
+      userText: text,
+      stage: client.stage,
+      questionStep: client.question_step,
+      pendingAction: client.pending_action,
+      expectedAnswer: "yes_or_no_for_restart_confirmation"
     }, "Aquí solo necesito que me respondas *sí* o *no*."));
 
     return true;

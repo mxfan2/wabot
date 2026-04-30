@@ -1,0 +1,46 @@
+1. Perfecto. Para revisar tu solicitud necesito hacerte unas preguntas rápidas.
+
+Primero, ¿me confirmas tu nombre completo?
+
+2. ¿Qué edad tienes?
+
+3. ¿Este número de WhatsApp es tu celular personal?
+
+4. ¿Cuál es tu número de celular personal?
+
+5. ¿Estás soltero(a), casado(a), viudo(a), divorciado(a) o separado(a)?
+
+6. Aquí sí necesito que me respondas con confianza:
+¿Actualmente debes o has quedado a deber en alguna casa de préstamos?
+
+7. Ahora vamos con tus ingresos.
+
+¿De dónde viene tu ingreso principal?
+
+8. ¿Es empleo, negocio propio, pensión, apoyo familiar, desempleado u otro?
+
+9. ¿Tienes comprobante de ingresos?
+
+10. ¿Cuál es la dirección de tu trabajo?
+
+11. ¿Tu trabajo tiene teléfono? ¿Cuál es?
+
+12. ¿Cuánto tiempo llevas trabajando ahí? (ej: 2 años, 2.5, etc.)
+
+13. ¿Cuál es la dirección de tu domicilio?
+
+14. ¿Cuánto ganas aproximadamente?
+
+15. ¿Ese ingreso es por semana, quincena o mes?
+
+16. ¿En tu casa hay otro ingreso aparte del tuyo?
+
+17. ¿Quién aporta ese ingreso, cuánto aporta y cada cuándo?
+
+18. ¿Cuánto pagas por semana o quincena en otras deudas? Si no tienes, responde *0*.
+
+19. ¿Cuánto tiempo llevas viviendo en esa casa?
+
+20. ¿A nombre de quién está la casa donde vives?
+
+21. ¿A nombre de quién aparece el comprobante de domicilio?

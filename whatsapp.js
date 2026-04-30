@@ -8,8 +8,29 @@ const { saveMessage } = require("./database");
 // WHATSAPP API SERVICE
 // =========================
 
+function summarizeAxiosError(error) {
+  const details = error.response?.data?.error || error.response?.data || {};
+  return {
+    code: error.code || details.code || null,
+    status: error.response?.status || null,
+    type: details.type || null,
+    message: details.message || error.message
+  };
+}
+
+function createWhatsappSendError(error) {
+  const summary = summarizeAxiosError(error);
+  const cleanError = new Error(`WhatsApp send failed: ${summary.message}`);
+  cleanError.name = "WhatsappSendError";
+  cleanError.code = summary.code;
+  cleanError.status = summary.status;
+  cleanError.details = summary;
+  return cleanError;
+}
+
 async function sendTextMessage(to, body) {
   const url = `https://graph.facebook.com/${CONFIG.GRAPH_VERSION}/${CONFIG.PHONE_NUMBER_ID}/messages`;
+  const attempts = Math.max(1, CONFIG.WHATSAPP_SEND_RETRIES + 1);
 
   try {
     if (CONFIG.MOCK_WHATSAPP_SEND) {
@@ -25,21 +46,42 @@ async function sendTextMessage(to, body) {
       return true;
     }
 
-    await axios.post(
-      url,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${CONFIG.WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await axios.post(
+          url,
+          {
+            messaging_product: "whatsapp",
+            to,
+            type: "text",
+            text: { body }
+          },
+          {
+            timeout: CONFIG.WHATSAPP_SEND_TIMEOUT_MS,
+            headers: {
+              Authorization: `Bearer ${CONFIG.WHATSAPP_TOKEN}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        const retryable = ["ETIMEDOUT", "ECONNRESET", "ECONNABORTED", "ENETUNREACH", "EAI_AGAIN"].includes(error.code)
+          || (error.response?.status >= 500 && error.response?.status < 600);
+
+        if (!retryable || attempt >= attempts) {
+          throw error;
         }
+
+        console.warn(`Retrying WhatsApp send to ${to} after ${error.code || error.response?.status || error.message} (${attempt}/${attempts})`);
+        await new Promise((resolve) => setTimeout(resolve, 750 * attempt));
       }
-    );
+    }
+
+    if (lastError) throw lastError;
 
     await saveMessage({
       wa_id: to,
@@ -50,8 +92,9 @@ async function sendTextMessage(to, body) {
 
     return true;
   } catch (error) {
-    console.error("Error sending text message:", error.response?.data || error.message);
-    throw error;
+    const cleanError = createWhatsappSendError(error);
+    console.error("Error sending text message:", cleanError.details);
+    throw cleanError;
   }
 }
 

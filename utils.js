@@ -82,6 +82,65 @@ function extractNumberFromText(text) {
   return match ? parseFloat(match[1]) : 0;
 }
 
+function hasRepeatedDigitRun(text, minLength = 5) {
+  return new RegExp(`(\\d)\\1{${minLength - 1},}`).test(String(text || ""));
+}
+
+function hasFakeOrPlaceholderWords(text) {
+  const clean = normalizeText(text);
+  const suspicious = [
+    "privado",
+    "secreto",
+    "no quiero",
+    "no te digo",
+    "inventado",
+    "fake",
+    "mentira",
+    "asdf",
+    "test",
+    "prueba"
+  ];
+  return suspicious.some((word) => clean.includes(word));
+}
+
+function hasAddressSignal(text) {
+  const clean = normalizeText(text);
+  const hasNumber = /\d/.test(clean);
+  const addressWords = [
+    "calle",
+    "av",
+    "avenida",
+    "col",
+    "colonia",
+    "fracc",
+    "fraccionamiento",
+    "privada",
+    "boulevard",
+    "blvd",
+    "casa",
+    "numero",
+    "número",
+    "#",
+    "entre"
+  ];
+  const hasAddressWord = addressWords.some((word) => clean.includes(word));
+  const meaningfulWords = clean.split(/\s+/).filter((word) => word.length > 2);
+  return clean.length >= 10 && (
+    (hasAddressWord && hasNumber && meaningfulWords.length >= 1)
+    || (meaningfulWords.length >= 2 && (hasNumber || hasAddressWord))
+  );
+}
+
+function parseTimePeriodYears(text) {
+  const clean = normalizeText(text);
+  const amount = extractNumberFromText(clean);
+  if (!amount) return 0;
+  if (clean.includes("mes")) return amount / 12;
+  if (clean.includes("semana")) return amount / 52;
+  if (clean.includes("dia") || clean.includes("día")) return amount / 365;
+  return amount;
+}
+
 function normalizeIncomeToWeekly(text) {
   const amount = extractNumberFromText(text);
   if (!amount) return 0;
@@ -133,17 +192,44 @@ const VALIDATION_RULES = {
   text: {
     validate: (value) => {
       const clean = (value || "").trim();
-      return clean.length >= CONFIG.TEXT_MIN_LENGTH;
+      if (clean.length < CONFIG.TEXT_MIN_LENGTH) return false;
+      if (hasRepeatedDigitRun(clean, 5)) return false;
+      if (/^\d+$/.test(clean)) return false;
+      return true;
     },
     errorMsg: "Por favor introduce un valor de texto válido (mínimo 2 caracteres)."
+  },
+
+  age: {
+    validate: (value) => {
+      const clean = normalizeText(value || "");
+      if (hasRepeatedDigitRun(clean, 3)) return false;
+      const age = extractNumberFromText(clean);
+      return Number.isFinite(age) && age >= 18 && age <= 99;
+    },
+    errorMsg: "Por favor introduce una edad real entre 18 y 99 años."
   },
 
   numeric: {
     validate: (value) => {
       const num = extractNumberFromText(value);
-      return !isNaN(num) && num > 0;
+      if (hasRepeatedDigitRun(value, 5)) return false;
+      return !isNaN(num) && num > 0 && num <= 1000000;
     },
     errorMsg: "Por favor introduzca un valor numérico válido."
+  },
+
+  income_amount: {
+    validate: (value) => {
+      const clean = normalizeText(value || "");
+      const amount = extractNumberFromText(clean);
+      if (!Number.isFinite(amount) || amount <= 0) return false;
+      if (hasRepeatedDigitRun(clean, 5)) return false;
+      if (amount < 100 || amount > 200000) return false;
+      if (clean.includes("dolar") || clean.includes("usd")) return false;
+      return true;
+    },
+    errorMsg: "Por favor indica un ingreso aproximado real en pesos. Ejemplo: 3500 por semana, 8000 quincenal o 15000 mensual."
   },
 
   phone: {
@@ -157,9 +243,13 @@ const VALIDATION_RULES = {
   address: {
     validate: (value) => {
       const clean = (value || "").trim();
-      return clean.length >= CONFIG.ADDRESS_MIN_LENGTH;
+      if (clean.length < CONFIG.ADDRESS_MIN_LENGTH) return false;
+      if (hasFakeOrPlaceholderWords(clean)) return false;
+      if (hasRepeatedDigitRun(clean, 4)) return false;
+      if (/^(si|sí|no|ok|va|claro)(\s+\1)*\s*\d*$/i.test(clean)) return false;
+      return hasAddressSignal(clean);
     },
-    errorMsg: `Por favor introduzca una dirección válida (mínimo ${CONFIG.ADDRESS_MIN_LENGTH} caracteres).`
+    errorMsg: "Por favor escribe una dirección real con calle/colonia y número o referencia. Ejemplo: Calle Reforma 123, Col. Centro."
   },
 
   income_type: {
@@ -186,7 +276,8 @@ const VALIDATION_RULES = {
   household_income_details: {
     validate: (value) => {
       const clean = (value || "").trim();
-      return clean.length >= 3 && /\d/.test(clean);
+      if (hasRepeatedDigitRun(clean, 5)) return false;
+      return clean.length >= 8 && /\d/.test(clean);
     },
     errorMsg: "Por favor indique quién aporta, cuánto aporta y cada cuándo. Ejemplo: mi esposo gana 8000 a la semana."
   },
@@ -194,7 +285,9 @@ const VALIDATION_RULES = {
   debt_payments: {
     validate: (value) => {
       const clean = normalizeText(value || "");
-      return fuzzyMatch(value, KEYWORDS.NO, 2) || clean === "0" || /\d/.test(clean);
+      if (hasRepeatedDigitRun(clean, 5)) return false;
+      const amount = extractNumberFromText(clean);
+      return fuzzyMatch(value, KEYWORDS.NO, 2) || clean === "0" || (amount >= 0 && amount <= 50000 && /\d/.test(clean));
     },
     errorMsg: "Por favor indique cuánto paga por semana o quincena en otras deudas. Si no tiene pagos, responda 0 o no."
   },
@@ -219,11 +312,11 @@ const VALIDATION_RULES = {
   time_period: {
     validate: (value) => {
       const clean = normalizeText(value || "");
-      // Accept: "2", "2 años", "2 años y 8 meses", etc.
-      const hasNumber = /\d/.test(clean);
-      return hasNumber && clean.length >= 1;
+      if (hasRepeatedDigitRun(clean, 4)) return false;
+      const years = parseTimePeriodYears(clean);
+      return years > 0 && years <= 80;
     },
-    errorMsg: "Por favor introduzca el tiempo (ej: 2 años, 2 años y 8 meses, 2.5)"
+    errorMsg: "Por favor introduce un tiempo real. Ejemplo: 8 meses, 2 años o 2.5 años."
   }
 };
 
