@@ -325,3 +325,78 @@
   - cuentas atrasadas.
 - Add WhatsApp receipt and payment status messages once loans/payment schedules exist.
 - Add dashboard/ERP controls for resending current question, correcting current step, and reviewing stuck chatbot conversations.
+
+## 2026-04-30 - Real ERP Loan Ledger and Conekta Payment Application by CODEX
+- Created a backup snapshot in `backups/20260430-104544/` before modifying ERP/payment code.
+- Added real ERP loan tables in `database.js`:
+  - `loans`
+  - `payment_schedule`
+- Expanded payment tracking so `payment_orders` and `payment_transactions` can store:
+  - `loan_id`
+  - `installment_id`
+  - applied payment amount.
+- Added ERP database helpers for:
+  - creating a loan with weekly schedule,
+  - listing eligible applications,
+  - listing active loans,
+  - listing scheduled payments,
+  - calculating ERP summary metrics,
+  - linking Conekta orders to installments,
+  - applying paid orders to loan balances and installment status.
+- Replaced the `/erp` shell with a data-backed operations UI:
+  - daily summary,
+  - application approval queue,
+  - active accounts,
+  - payment calendar,
+  - overdue indicators,
+  - unmatched Conekta count.
+- Added ERP API routes:
+  - `GET /erp/api/overview`
+  - `POST /erp/api/clients/:waId/approve-loan`
+- Approval flow now:
+  - creates a loan,
+  - generates weekly installments,
+  - creates Conekta recurrent SPEI orders tied to `loan_id` and `installment_id`,
+  - links each provider order back to the installment,
+  - stores the reusable CLABE/bank on the loan,
+  - sends the borrower a WhatsApp approval/payment instruction message when CLABE is available.
+- Updated Conekta `order.paid` webhook handling so matched paid orders automatically:
+  - mark the Conekta payment order as paid,
+  - apply the amount to the linked installment/loan,
+  - handle partial and overpay-forward application to oldest open installments,
+  - update loan paid balance and paid status,
+  - store payment transaction application metadata,
+  - send a WhatsApp receipt for newly processed events.
+- Verified:
+  - `node --check database.js`
+  - `node --check server.js`
+  - ERP summary DB helpers against the current SQLite database,
+  - `npm run test:webhook`,
+  - `GET /erp/api/overview` on a temporary local server at port `3002`.
+
+## 2026-04-30 - Bot Restart After ERP Changes by CODEX
+- Restarted the Wabot server on port `3001` so the new ERP loan and payment routes are active.
+- Confirmed the restarted process is listening on `0.0.0.0:3001`.
+- Verified `GET /erp/api/overview` returns `200` on port `3001`.
+- Re-ran `npm run test:webhook` successfully after restart.
+
+## 2026-04-30 - ERP Summary Count Fix by CODEX
+- Fixed `/erp` summary totals that were multiplied by the number of scheduled installments because the aggregate query joined `loans` to `payment_schedule`.
+- `Cuentas activas` and `Cartera activa` now aggregate directly from `loans`.
+- `Pagos hoy` and `Atrasos` still aggregate from `payment_schedule`.
+- Updated ERP approval copy to clarify that the reusable CLABE SPEI is generated automatically through the Conekta API during loan approval; no manual capture in Conekta is needed.
+- Verified the current database now reports `1` active loan and `$4,500.00 MXN` active balance instead of `10` and `$45,000.00 MXN`.
+- Re-ran:
+  - `node --check database.js`
+  - `node --check server.js`
+  - `npm run test:webhook`
+
+## 2026-04-30 - Fixed Public Webhook Domain via Caddy by CODEX
+- Confirmed `wabot.kvlaurb.com` resolves publicly to `177.229.134.26`.
+- Confirmed Caddy on the Windows Server serves `https://wabot.kvlaurb.com` and reverse-proxies to the local Wabot service on `192.168.0.100:3001`.
+- Verified:
+  - `https://wabot.kvlaurb.com/erp/api/overview` returns `200`.
+  - `http://wabot.kvlaurb.com/erp/api/overview` redirects to HTTPS with `308`.
+- Updated `.env` `BASE_URL` to `https://wabot.kvlaurb.com`.
+- Restarted the Wabot process on port `3001`.
+- Re-ran `npm run test:webhook` successfully after the public domain change.

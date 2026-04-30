@@ -22,10 +22,21 @@ const {
   createClientIfNotExists,
   updateClient,
   saveMessage,
+  createLoanWithSchedule,
+  getLoanDetail,
+  getActiveLoanByWaId,
+  updateLoanConektaInfo,
+  linkInstallmentPaymentOrder,
+  listErpEligibleClients,
+  listErpLoans,
+  listErpPayments,
+  getErpSummary,
+  applyPaymentToLoan,
   createPaymentOrder,
   getPaymentOrderByProviderOrderId,
   markPaymentOrderPaid,
   savePaymentTransaction,
+  updatePaymentTransactionApplication,
   resetToStage1,
   discardClientApplication,
   closeDatabase
@@ -207,6 +218,24 @@ function formatCurrencyFromCents(amountCents, currency = "MXN") {
   }).format(amount);
 }
 
+function addDaysIso(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function buildLoanWelcomeMessage({ loan, schedule, clabe, bank }) {
+  const firstPayment = schedule[0];
+  return [
+    "Tu prestamo fue aprobado y ya quedo activo.",
+    `Monto a pagar: ${formatCurrencyFromCents(loan.total_payable_cents, loan.currency)} en ${loan.term_weeks} pagos de ${formatCurrencyFromCents(loan.weekly_payment_cents, loan.currency)}.`,
+    firstPayment ? `Primer pago: ${formatCurrencyFromCents(firstPayment.amount_due_cents, firstPayment.currency)} vence el ${firstPayment.due_date}.` : "",
+    clabe ? `CLABE SPEI para tus pagos: ${clabe}` : "",
+    bank ? `Banco receptor: ${bank}` : "",
+    "Cuando pagues por SPEI, el sistema lo acreditara automaticamente cuando Conekta confirme el pago."
+  ].filter(Boolean).join("\n");
+}
+
 function formatPemPublicKey(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -251,7 +280,7 @@ function verifyConektaWebhookSignature(req) {
   }
 }
 
-async function createConektaSpeiPaymentForClient(client, amountCents, description = "Pago semanal") {
+async function createConektaSpeiPaymentForClient(client, amountCents, description = "Pago semanal", metadata = {}) {
   let conektaCustomerId = client.conekta_customer_id;
   let conektaSpeiSourceId = client.conekta_spei_source_id;
   let conektaSpeiClabe = client.conekta_spei_clabe;
@@ -290,7 +319,8 @@ async function createConektaSpeiPaymentForClient(client, amountCents, descriptio
     metadata: {
       client_stage: client.stage || "",
       client_status: client.status || "",
-      spei_source_id: conektaSpeiSourceId
+      spei_source_id: conektaSpeiSourceId,
+      ...metadata
     }
   });
 
@@ -298,6 +328,8 @@ async function createConektaSpeiPaymentForClient(client, amountCents, descriptio
   await createPaymentOrder({
     wa_id: client.wa_id,
     provider: "conekta",
+    loan_id: metadata.loan_id || null,
+    installment_id: metadata.installment_id || null,
     provider_order_id: paymentInfo.orderId,
     provider_charge_id: paymentInfo.chargeId,
     amount_cents: paymentInfo.amountCents || amountCents,
@@ -314,6 +346,9 @@ async function createConektaSpeiPaymentForClient(client, amountCents, descriptio
       description,
       conektaCustomerId,
       conektaSpeiSourceId,
+      loan_id: metadata.loan_id || null,
+      installment_id: metadata.installment_id || null,
+      installment_number: metadata.installment_number || null,
       conektaOrder: order
     }
   });
@@ -1767,24 +1802,46 @@ function renderErpPage() {
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #1f2933; background: #f4f6f8; }
-    header { padding: 18px 24px; border-bottom: 1px solid #d9e0e7; background: #fff; display: flex; justify-content: space-between; gap: 16px; }
-    h1, h2, p { margin: 0; }
+    header { padding: 18px 24px; border-bottom: 1px solid #d9e0e7; background: #fff; display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    h1, h2, h3, p { margin: 0; }
     h1 { font-size: 22px; }
+    h2 { font-size: 18px; margin-bottom: 8px; }
     .muted { color: #64748b; font-size: 13px; margin-top: 4px; }
     main { padding: 20px 24px; display: grid; grid-template-columns: 220px 1fr; gap: 18px; }
     nav, section { background: #fff; border: 1px solid #d9e0e7; border-radius: 8px; }
-    nav { padding: 10px; height: fit-content; }
-    .nav-item { padding: 10px; border-radius: 6px; font-size: 14px; color: #334155; }
+    nav { padding: 10px; height: fit-content; position: sticky; top: 12px; }
+    button, input { font: inherit; }
+    .nav-item { width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer; padding: 10px; border-radius: 6px; font-size: 14px; color: #334155; }
     .nav-item.active { background: #e8f0fe; color: #174ea6; font-weight: 700; }
+    .workspace { display: flex; flex-direction: column; gap: 16px; }
     section { padding: 16px; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 18px; }
-    .card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #fbfdff; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 0; }
+    .card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #fbfdff; min-width: 0; }
     .label { font-size: 11px; text-transform: uppercase; color: #64748b; }
     .value { font-size: 24px; margin-top: 6px; font-weight: 700; }
-    .table { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
-    .row { display: grid; grid-template-columns: 1.1fr 0.8fr 0.8fr 0.9fr 0.8fr; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
-    .row.head { background: #f8fafc; color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700; }
-    .row:last-child { border-bottom: 0; }
+    .table { border: 1px solid #e2e8f0; border-radius: 8px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+    th { background: #f8fafc; color: #64748b; font-size: 11px; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    .section-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; margin-bottom: 12px; }
+    .btn { border: 1px solid #cbd5e1; background: #fff; color: #1f2933; border-radius: 6px; padding: 8px 10px; cursor: pointer; font-size: 13px; }
+    .btn.primary { background: #174ea6; color: #fff; border-color: #174ea6; }
+    .btn:disabled { opacity: 0.55; cursor: progress; }
+    .pill { display: inline-flex; border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #eef2f7; color: #475569; }
+    .pill.good { background: #dcfce7; color: #166534; }
+    .pill.warn { background: #fef3c7; color: #92400e; }
+    .pill.bad { background: #fee2e2; color: #991b1b; }
+    .form-grid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field span { font-size: 11px; text-transform: uppercase; color: #64748b; }
+    .field input { border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; min-width: 0; }
+    .flash { padding: 10px 12px; border-radius: 8px; border: 1px solid #cbd5e1; background: #fff; font-size: 13px; }
+    .flash.ok { background: #dcfce7; border-color: #bbf7d0; color: #166534; }
+    .flash.error { background: #fee2e2; border-color: #fecaca; color: #991b1b; }
+    .empty { padding: 16px; color: #64748b; font-size: 13px; }
+    .tab-panel[hidden] { display: none; }
+    @media (max-width: 980px) { main { grid-template-columns: 1fr; padding: 14px; } .grid, .form-grid { grid-template-columns: 1fr; } nav { position: static; } }
   </style>
 </head>
 <body>
@@ -1793,45 +1850,119 @@ function renderErpPage() {
       <h1>Wabot ERP</h1>
       <p class="muted">Cartera, cuentas activas, pagos, conciliacion y cobranza.</p>
     </div>
-    <p class="muted">Modo inicial: estructura base</p>
+    <button id="refreshBtn" class="btn" type="button">Actualizar</button>
   </header>
   <main>
     <nav>
-      <div class="nav-item active">Resumen</div>
-      <div class="nav-item">Solicitudes aprobadas</div>
-      <div class="nav-item">Cuentas activas</div>
-      <div class="nav-item">Pagos de hoy</div>
-      <div class="nav-item">Conciliacion Conekta</div>
-      <div class="nav-item">Atrasos</div>
-      <div class="nav-item">Reportes</div>
+      <button class="nav-item active" type="button" data-tab="summary">Resumen</button>
+      <button class="nav-item" type="button" data-tab="approvals">Aprobar solicitudes</button>
+      <button class="nav-item" type="button" data-tab="loans">Cuentas activas</button>
+      <button class="nav-item" type="button" data-tab="payments">Pagos y atrasos</button>
+      <button class="nav-item" type="button" data-tab="reconcile">Conciliacion Conekta</button>
     </nav>
-    <section>
-      <h2>Centro diario de operacion</h2>
-      <p class="muted">Este panel va separado del dashboard de conversaciones. Aqui viviran prestamos, pagos y cartera.</p>
-      <div class="grid">
-        <div class="card"><div class="label">Pagos hoy</div><div class="value">0</div></div>
-        <div class="card"><div class="label">Por conciliar</div><div class="value">0</div></div>
-        <div class="card"><div class="label">Atrasados</div><div class="value">0</div></div>
-        <div class="card"><div class="label">Cuentas activas</div><div class="value">0</div></div>
-      </div>
-      <div class="table">
-        <div class="row head">
-          <div>Cliente</div>
-          <div>Prestamo</div>
-          <div>Proximo pago</div>
-          <div>Estado</div>
-          <div>Accion</div>
-        </div>
-        <div class="row">
-          <div>Sin datos todavia</div>
-          <div>-</div>
-          <div>-</div>
-          <div>Esperando modelo de cuentas</div>
-          <div>-</div>
-        </div>
-      </div>
-    </section>
+    <div class="workspace">
+      <div id="flash"></div>
+      <section id="summary" class="tab-panel">
+        <h2>Centro diario de operacion</h2>
+        <p class="muted">Resumen de cartera, pagos de hoy, atrasos y conciliacion.</p>
+        <div id="summaryGrid" class="grid"></div>
+      </section>
+      <section id="approvals" class="tab-panel" hidden>
+        <div class="section-head"><div><h2>Aprobar solicitudes</h2><p class="muted">Clientes con expediente listo y sin prestamo activo. La CLABE SPEI se genera automaticamente por API de Conekta al aprobar.</p></div></div>
+        <div id="approvalsTable" class="table"></div>
+      </section>
+      <section id="loans" class="tab-panel" hidden>
+        <div class="section-head"><div><h2>Cuentas activas</h2><p class="muted">Saldo, siguiente vencimiento y CLABE reutilizable.</p></div></div>
+        <div id="loansTable" class="table"></div>
+      </section>
+      <section id="payments" class="tab-panel" hidden>
+        <div class="section-head"><div><h2>Pagos y atrasos</h2><p class="muted">Calendario completo con estado por cuota.</p></div></div>
+        <div id="paymentsTable" class="table"></div>
+      </section>
+      <section id="reconcile" class="tab-panel" hidden>
+        <h2>Conciliacion Conekta</h2>
+        <p class="muted">Los pagos no identificados quedan como unmatched_order en payment_transactions para revision manual.</p>
+        <div id="reconcileBody" class="empty"></div>
+      </section>
+    </div>
   </main>
+  <script>
+    const state = { summary: {}, eligibleClients: [], loans: [], payments: [] };
+    const money = (cents, currency = "MXN") => new Intl.NumberFormat("es-MX", { style: "currency", currency }).format((Number(cents || 0)) / 100);
+    const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    const displayName = (item) => item.full_name || item.profile_name || item.wa_id || "Cliente";
+    function showFlash(type, message) { document.getElementById("flash").innerHTML = message ? '<div class="flash ' + esc(type) + '">' + esc(message) + '</div>' : ""; }
+    function statusPill(status, dueDate) {
+      const today = new Date().toISOString().slice(0, 10);
+      if (status === "paid") return '<span class="pill good">Pagado</span>';
+      if (dueDate && dueDate < today) return '<span class="pill bad">Atrasado</span>';
+      if (status === "partial") return '<span class="pill warn">Parcial</span>';
+      return '<span class="pill">Pendiente</span>';
+    }
+    function renderSummary() {
+      const s = state.summary || {};
+      document.getElementById("summaryGrid").innerHTML = [
+        ["Cuentas activas", s.active_loans || 0],
+        ["Cartera activa", money(s.active_balance_cents || 0)],
+        ["Pagos hoy", (s.due_today_count || 0) + " / " + money(s.due_today_cents || 0)],
+        ["Atrasos", (s.overdue_count || 0) + " / " + money(s.overdue_cents || 0)],
+        ["No identificados", s.unmatched_count || 0]
+      ].map(([label, value]) => '<div class="card"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></div>').join("");
+      document.getElementById("reconcileBody").textContent = (s.unmatched_count || 0) + " pagos no identificados registrados.";
+    }
+    function renderApprovals() {
+      const rows = state.eligibleClients.map((client) => {
+        return '<tr><td><strong>' + esc(displayName(client)) + '</strong><br><span class="muted">' + esc(client.wa_id) + '</span></td><td>' + esc(client.score || 0) + '/100</td><td>' + esc(client.status || client.stage || "-") + '</td><td><div class="form-grid"><label class="field"><span>Prestamo</span><input data-field="principal" value="3000"></label><label class="field"><span>Pago semanal</span><input data-field="weekly" value="450"></label><label class="field"><span>Semanas</span><input data-field="term" value="10"></label><label class="field"><span>Primer venc.</span><input data-field="firstDue" type="date"></label><button class="btn primary approve-btn" type="button" data-wa-id="' + esc(client.wa_id) + '">Aprobar prestamo</button></div></td></tr>';
+      }).join("");
+      document.getElementById("approvalsTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Score</th><th>Estado</th><th>Alta de prestamo</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">No hay solicitudes listas para aprobar.</div>';
+      document.querySelectorAll(".approve-btn").forEach((button) => button.addEventListener("click", approveLoan));
+    }
+    function renderLoans() {
+      const rows = state.loans.map((loan) => '<tr><td><strong>' + esc(displayName(loan)) + '</strong><br><span class="muted">' + esc(loan.wa_id) + '</span></td><td>' + money(loan.principal_cents, loan.currency) + '<br><span class="muted">Total ' + money(loan.total_payable_cents, loan.currency) + '</span></td><td>' + money(loan.amount_paid_cents, loan.currency) + '<br><span class="muted">Saldo ' + money(loan.balance_cents, loan.currency) + '</span></td><td>' + esc(loan.next_due_date || "-") + '</td><td>' + (loan.overdue_count ? '<span class="pill bad">' + esc(loan.overdue_count) + ' vencidas</span>' : '<span class="pill good">Al corriente</span>') + '</td><td>' + esc(loan.conekta_spei_clabe || "-") + '<br><span class="muted">' + esc(loan.conekta_spei_bank || "") + '</span></td></tr>').join("");
+      document.getElementById("loansTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Prestamo</th><th>Pagado</th><th>Proximo pago</th><th>Estado</th><th>CLABE</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">Todavia no hay prestamos activos.</div>';
+    }
+    function renderPayments() {
+      const rows = state.payments.map((p) => '<tr><td><strong>' + esc(displayName(p)) + '</strong><br><span class="muted">' + esc(p.wa_id) + '</span></td><td>#' + esc(p.installment_number) + '</td><td>' + esc(p.due_date || "-") + '</td><td>' + money(p.amount_due_cents, p.currency) + '</td><td>' + money(p.amount_paid_cents, p.currency) + '</td><td>' + statusPill(p.status, p.due_date) + '</td><td>' + esc(p.provider_order_id || "-") + '</td></tr>').join("");
+      document.getElementById("paymentsTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Cuota</th><th>Vence</th><th>Monto</th><th>Pagado</th><th>Estado</th><th>Orden</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">Sin calendario de pagos.</div>';
+    }
+    async function refresh() {
+      showFlash("", "");
+      const response = await fetch("/erp/api/overview");
+      const data = await response.json();
+      state.summary = data.summary || {};
+      state.eligibleClients = data.eligibleClients || [];
+      state.loans = data.loans || [];
+      state.payments = data.payments || [];
+      renderSummary(); renderApprovals(); renderLoans(); renderPayments();
+    }
+    async function approveLoan(event) {
+      const button = event.currentTarget;
+      const row = button.closest("tr");
+      const getField = (name) => row.querySelector('[data-field="' + name + '"]').value;
+      button.disabled = true;
+      try {
+        const response = await fetch("/erp/api/clients/" + encodeURIComponent(button.getAttribute("data-wa-id")) + "/approve-loan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ principal: getField("principal"), weeklyPayment: getField("weekly"), termWeeks: getField("term"), firstDueDate: getField("firstDue") })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "No se pudo aprobar");
+        showFlash("ok", payload.message || "Prestamo aprobado.");
+        await refresh();
+      } catch (error) {
+        showFlash("error", error.message || "No se pudo aprobar el prestamo.");
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => {
+      document.querySelectorAll("[data-tab]").forEach((item) => item.classList.toggle("active", item === button));
+      document.querySelectorAll(".tab-panel").forEach((panel) => panel.hidden = panel.id !== button.dataset.tab);
+    }));
+    document.getElementById("refreshBtn").addEventListener("click", refresh);
+    refresh().catch((error) => showFlash("error", error.message || "No se pudo cargar ERP."));
+  </script>
 </body>
 </html>`;
 }
@@ -2173,6 +2304,130 @@ app.get("/erp", (req, res) => {
   res.type("html").send(renderErpPage());
 });
 
+app.get("/erp/api/overview", async (req, res) => {
+  try {
+    const [summary, eligibleClients, loans, payments] = await Promise.all([
+      getErpSummary(),
+      listErpEligibleClients(),
+      listErpLoans(),
+      listErpPayments()
+    ]);
+
+    return res.json({ summary, eligibleClients, loans, payments });
+  } catch (error) {
+    console.error("ERP overview error:", error);
+    return res.status(500).json({ error: "Failed to load ERP overview" });
+  }
+});
+
+app.post("/erp/api/clients/:waId/approve-loan", async (req, res) => {
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    const existingActiveLoan = await getActiveLoanByWaId(client.wa_id);
+    if (existingActiveLoan) {
+      return res.status(409).json({ error: "Client already has an active loan" });
+    }
+
+    const principalCents = parseAmountToCents(req.body?.principal);
+    const weeklyPaymentCents = parseAmountToCents(req.body?.weeklyPayment);
+    const termWeeks = Number.parseInt(req.body?.termWeeks, 10);
+    const totalPayableCents = parseAmountToCents(req.body?.totalPayable) || (weeklyPaymentCents * termWeeks);
+    const firstDueDate = String(req.body?.firstDueDate || "").trim() || addDaysIso(7);
+
+    if (!principalCents || !weeklyPaymentCents || !Number.isInteger(termWeeks) || termWeeks <= 0 || termWeeks > 104) {
+      return res.status(400).json({ error: "Loan amount, weekly payment, and valid term are required" });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(firstDueDate)) {
+      return res.status(400).json({ error: "firstDueDate must use YYYY-MM-DD format" });
+    }
+
+    const loanDetail = await createLoanWithSchedule({
+      wa_id: client.wa_id,
+      principal_cents: principalCents,
+      total_payable_cents: totalPayableCents,
+      weekly_payment_cents: weeklyPaymentCents,
+      term_weeks: termWeeks,
+      first_due_date: firstDueDate,
+      disbursement_date: String(req.body?.disbursementDate || "").trim() || new Date().toISOString().slice(0, 10),
+      notes: String(req.body?.notes || "").trim() || null
+    });
+
+    const loan = loanDetail.loan;
+    const schedule = loanDetail.schedule;
+    const orderResults = [];
+    let conektaWarning = null;
+    let latestClient = await getClient(client.wa_id);
+
+    for (const installment of schedule) {
+      try {
+        const paymentInfo = await createConektaSpeiPaymentForClient(
+          latestClient,
+          installment.amount_due_cents,
+          `Pago ${installment.installment_number}/${termWeeks} prestamo #${loan.id}`,
+          {
+            loan_id: loan.id,
+            installment_id: installment.id,
+            installment_number: installment.installment_number,
+            due_date: installment.due_date
+          }
+        );
+
+        if (paymentInfo.orderId) {
+          await linkInstallmentPaymentOrder(installment.id, paymentInfo.orderId);
+        }
+
+        await updateLoanConektaInfo(loan.id, {
+          conekta_customer_id: paymentInfo.customerId,
+          conekta_spei_source_id: paymentInfo.speiSourceId,
+          conekta_spei_clabe: paymentInfo.clabe,
+          conekta_spei_bank: paymentInfo.bank
+        });
+
+        orderResults.push(paymentInfo);
+        latestClient = await getClient(client.wa_id);
+      } catch (error) {
+        conektaWarning = summarizeConektaError(error);
+        console.error("ERP loan Conekta order error:", conektaWarning);
+        break;
+      }
+    }
+
+    const refreshedLoanDetail = await getLoanDetail(loan.id);
+    const firstOrder = orderResults[0] || {};
+
+    if (firstOrder.clabe) {
+      await sendTextMessage(
+        client.wa_id,
+        buildLoanWelcomeMessage({
+          loan: refreshedLoanDetail.loan,
+          schedule: refreshedLoanDetail.schedule,
+          clabe: firstOrder.clabe,
+          bank: firstOrder.bank
+        })
+      );
+    }
+
+    return res.json({
+      ok: true,
+      loan: refreshedLoanDetail.loan,
+      schedule: refreshedLoanDetail.schedule,
+      ordersCreated: orderResults.length,
+      warning: conektaWarning,
+      message: conektaWarning
+        ? `Prestamo creado, pero solo se generaron ${orderResults.length} ordenes Conekta. Revisa la conexion antes de continuar.`
+        : `Prestamo aprobado con ${orderResults.length} ordenes Conekta ligadas.`
+    });
+  } catch (error) {
+    console.error("ERP approve loan error:", error);
+    return res.status(500).json({ error: error.message || "Failed to approve loan" });
+  }
+});
+
 app.get("/dashboard/clients/:waId/compact-card", async (req, res) => {
   try {
     const client = await getClient(req.params.waId);
@@ -2331,6 +2586,8 @@ app.post("/payments/conekta/webhook", async (req, res) => {
       provider_order_id: paymentInfo.orderId,
       provider_charge_id: paymentInfo.chargeId,
       wa_id: paymentOrder?.wa_id || order.metadata?.wa_id || null,
+      loan_id: paymentOrder?.loan_id || order.metadata?.loan_id || null,
+      installment_id: paymentOrder?.installment_id || order.metadata?.installment_id || null,
       amount_cents: paymentInfo.amountCents,
       currency: paymentInfo.currency,
       paid_at: paymentInfo.paidAt,
@@ -2345,10 +2602,29 @@ app.post("/payments/conekta/webhook", async (req, res) => {
         currency: paymentInfo.currency
       });
 
+      let application = null;
+      if (inserted && paymentOrder.loan_id) {
+        application = await applyPaymentToLoan({
+          loanId: paymentOrder.loan_id,
+          installmentId: paymentOrder.installment_id,
+          amountCents: paymentInfo.amountCents,
+          paidAt: paymentInfo.paidAt
+        });
+
+        await updatePaymentTransactionApplication("conekta", event.id, {
+          loan_id: paymentOrder.loan_id,
+          installment_id: application.installmentId || paymentOrder.installment_id,
+          applied_amount_cents: application.appliedAmountCents,
+          status: "applied_to_installment"
+        });
+      }
+
       if (inserted && paymentOrder.wa_id) {
         await sendTextMessage(
           paymentOrder.wa_id,
-          `Pago recibido por ${formatCurrencyFromCents(paymentInfo.amountCents, paymentInfo.currency)}. Gracias, ya quedó registrado.`
+          application?.appliedAmountCents
+            ? `Pago recibido por ${formatCurrencyFromCents(paymentInfo.amountCents, paymentInfo.currency)}. Se acredito ${formatCurrencyFromCents(application.appliedAmountCents, paymentInfo.currency)} a tu cuenta. Gracias, ya quedo registrado.`
+            : `Pago recibido por ${formatCurrencyFromCents(paymentInfo.amountCents, paymentInfo.currency)}. Gracias, ya quedo registrado.`
         );
       }
     }
