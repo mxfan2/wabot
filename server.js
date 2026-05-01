@@ -19,12 +19,18 @@ const {
   getClient,
   getClientsWithLastMessage,
   getMessagesByClient,
+  createOrRestoreClient,
   createClientIfNotExists,
   updateClient,
+  archiveClient,
+  unarchiveClient,
+  softDeleteClient,
   saveMessage,
   createLoanWithSchedule,
   getLoanDetail,
   getActiveLoanByWaId,
+  updateLoanEditableFields,
+  updateInstallmentEditableFields,
   updateLoanConektaInfo,
   linkInstallmentPaymentOrder,
   listErpEligibleClients,
@@ -208,6 +214,14 @@ function parseAmountToCents(value) {
   const amount = Number(String(value || "").replace(/[^\d.]/g, ""));
   if (!Number.isFinite(amount) || amount <= 0) return null;
   return Math.round(amount * 100);
+}
+
+function normalizeWaId(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length === 10) return `521${digits}`;
+  if (digits.length === 12 && digits.startsWith("52")) return `521${digits.slice(2)}`;
+  return digits;
 }
 
 function formatCurrencyFromCents(amountCents, currency = "MXN") {
@@ -1114,6 +1128,42 @@ function renderDashboardPage() {
       color: var(--muted);
     }
 
+    .quick-form {
+      display: grid;
+      grid-template-columns: minmax(160px, 0.7fr) minmax(220px, 1fr) auto;
+      gap: 10px;
+      margin-top: 14px;
+      align-items: start;
+    }
+
+    .quick-form input,
+    .quick-form textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+      color: var(--text);
+    }
+
+    .button.danger {
+      border-color: rgba(185, 28, 28, 0.24);
+      color: var(--danger);
+      background: var(--danger-soft);
+    }
+
+    .editor-tools {
+      display: none;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    .editor-mode .editor-tools {
+      display: flex;
+    }
+
     .flash {
       padding: 10px 12px;
       border-radius: 14px;
@@ -1253,6 +1303,7 @@ function renderDashboardPage() {
         <div id="summaryGrid" class="summary-grid"></div>
       </div>
       <div class="hero-actions">
+        <button id="editorModeBtn" class="button" type="button">Editor mode: Off</button>
         <button id="refreshBtn" class="button" type="button">Refresh</button>
       </div>
     </section>
@@ -1267,6 +1318,12 @@ function renderDashboardPage() {
         <div class="search-wrap">
           <input id="clientSearch" class="search" type="search" placeholder="Search by name, number, stage, or answer" />
         </div>
+        <form id="startConversationForm" class="quick-form">
+          <input id="startConversationPhone" type="text" placeholder="WhatsApp number" />
+          <textarea id="startConversationBody" rows="2" placeholder="First message"></textarea>
+          <button id="sendNewClientBtn" class="button primary" type="submit">Enviar mensaje inicial</button>
+        </form>
+        <div id="startConversationFlash" class="helper-text"></div>
         <section class="queue-section">
           <div class="queue-head">
             <div class="queue-title">Completed qualification</div>
@@ -1323,7 +1380,8 @@ function renderDashboardPage() {
       selectedClient: null,
       selectedDetail: null,
       search: "",
-      flash: null
+      flash: null,
+      editorMode: false
     };
 
     const summaryGridEl = document.getElementById("summaryGrid");
@@ -1339,6 +1397,11 @@ function renderDashboardPage() {
     const chatPillsEl = document.getElementById("chatPills");
     const clientSearchEl = document.getElementById("clientSearch");
     const refreshBtnEl = document.getElementById("refreshBtn");
+    const editorModeBtnEl = document.getElementById("editorModeBtn");
+    const startConversationFormEl = document.getElementById("startConversationForm");
+    const startConversationPhoneEl = document.getElementById("startConversationPhone");
+    const startConversationBodyEl = document.getElementById("startConversationBody");
+    const startConversationFlashEl = document.getElementById("startConversationFlash");
     const compactPdfBtnEl = document.getElementById("compactPdfBtn");
     const jumpCompletedBtnEl = document.getElementById("jumpCompletedBtn");
     const jumpIncompleteBtnEl = document.getElementById("jumpIncompleteBtn");
@@ -1511,13 +1574,14 @@ function renderDashboardPage() {
       const pills = [
         "Stage: " + (client.stage || "unknown"),
         "Status: " + (client.status || "unknown"),
+        client.archived_at ? "Archived" : null,
         "Score: " + (Number(client.score) || 0) + "/100",
         "Qualification: " + detail.overview.qualification.answeredCount + "/" + detail.overview.qualification.totalCount,
         "Documents: " + detail.overview.documents.completed + "/" + detail.overview.documents.total,
         "Updated: " + formatDate(client.updated_at)
       ];
 
-      chatPillsEl.innerHTML = pills.map((pill) => '<span class="pill">' + escapeHtml(pill) + "</span>").join("");
+      chatPillsEl.innerHTML = pills.filter(Boolean).map((pill) => '<span class="pill">' + escapeHtml(pill) + "</span>").join("");
     }
 
     function renderMessages(messages) {
@@ -1579,6 +1643,50 @@ function renderDashboardPage() {
           <div class="answer-value">\${escapeHtml(answer.displayValue)}</div>
         </article>
       \`).join("");
+    }
+
+    function buildFollowUpDraft(client, detail) {
+      const name = (client.full_name || client.profile_name || "").trim();
+      const greeting = name ? "Hola " + name.split(/\\s+/)[0] + "," : "Hola,";
+      const qualification = detail?.overview?.qualification || {};
+      const documents = detail?.overview?.documents || {};
+      const currentQuestion = qualification.currentQuestion || "la pregunta pendiente";
+      const expectedDocument = documents.expectedDocument
+        ? (documents.items || []).find((item) => item.key === documents.expectedDocument)
+        : null;
+
+      if (client.stage === "section_1" || client.stage === "section_2" || client.status === "active") {
+        return [
+          greeting,
+          "te escribo para dar seguimiento a tu solicitud de prestamo. Aun falta completar el cuestionario para poder revisar si calificas.",
+          "La pregunta pendiente es: " + currentQuestion,
+          "Si tienes alguna duda o prefieres hablar con un asesor, dime y con gusto te apoyamos."
+        ].join("\\n");
+      }
+
+      if (client.stage === "awaiting_documents" || client.status === "pending_documents") {
+        const docLabel = expectedDocument?.label || "la documentacion pendiente";
+        return [
+          greeting,
+          "te escribo para dar seguimiento a tu solicitud. Ya tenemos tu cuestionario, pero falta completar la documentacion.",
+          "El documento pendiente es: " + docLabel + ".",
+          "Si tienes alguna duda para enviarlo o deseas hablar con un asesor, dime y te apoyamos."
+        ].join("\\n");
+      }
+
+      if (client.stage === "under_review" || client.status === "under_review" || client.status === "documents_uploaded") {
+        return [
+          greeting,
+          "te escribo para confirmar que recibimos tu informacion y estamos revisando tu solicitud.",
+          "Si tienes alguna duda o deseas hablar con un asesor, dime y con gusto te apoyamos."
+        ].join("\\n");
+      }
+
+      return [
+        greeting,
+        "te escribo para dar seguimiento a tu solicitud de prestamo.",
+        "Si tienes alguna duda, quieres completar informacion pendiente o deseas hablar con un asesor, dime y con gusto te apoyamos."
+      ].join("\\n");
     }
 
     function renderDetail(client, detail, messages) {
@@ -1662,10 +1770,15 @@ function renderDashboardPage() {
               <h3>Send custom message</h3>
               <div class="section-subtitle">Write a manual WhatsApp message to this applicant. It will be saved in the conversation history and move completed files into the contacted stage.</div>
               \${flash}
+              <div class="editor-tools">
+                <button id="archiveClientBtn" class="button" type="button">\${client.archived_at ? "Unarchive chat" : "Archive chat"}</button>
+                <button id="deleteClientBtn" class="button danger" type="button">Delete chat</button>
+              </div>
               <form id="manualMessageForm" class="composer">
                 <textarea id="manualMessageText" placeholder="Write the custom message you want to send..."></textarea>
                 <div class="composer-footer">
                   <div class="helper-text">Sending uses the same WhatsApp delivery flow as the bot.</div>
+                  <button id="draftFollowUpBtn" class="button" type="button">Draft follow-up</button>
                   <button class="button primary" type="submit">Send message</button>
                 </div>
               </form>
@@ -1677,6 +1790,14 @@ function renderDashboardPage() {
       const form = document.getElementById("manualMessageForm");
       const textArea = document.getElementById("manualMessageText");
       if (form && textArea) {
+        const draftFollowUpBtn = document.getElementById("draftFollowUpBtn");
+        if (draftFollowUpBtn) {
+          draftFollowUpBtn.addEventListener("click", () => {
+            textArea.value = buildFollowUpDraft(client, detail);
+            textArea.focus();
+          });
+        }
+
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
           const body = textArea.value.trim();
@@ -1703,10 +1824,28 @@ function renderDashboardPage() {
           }
         });
       }
+
+      const archiveButton = document.getElementById("archiveClientBtn");
+      if (archiveButton) {
+        archiveButton.addEventListener("click", async () => {
+          if (!state.selectedClientId) return;
+          const action = client.archived_at ? "unarchive" : "archive";
+          await updateClientVisibility(action);
+        });
+      }
+
+      const deleteButton = document.getElementById("deleteClientBtn");
+      if (deleteButton) {
+        deleteButton.addEventListener("click", async () => {
+          if (!state.selectedClientId) return;
+          if (!confirm("Delete this chat from dashboard views? History is kept in the database backup/audit tables.")) return;
+          await updateClientVisibility("delete");
+        });
+      }
     }
 
     async function loadClients() {
-      const response = await fetch("/dashboard/api/clients");
+      const response = await fetch("/dashboard/api/clients?includeArchived=" + (state.editorMode ? "1" : "0"));
       const data = await response.json();
       state.clients = data.clients || [];
 
@@ -1753,6 +1892,21 @@ function renderDashboardPage() {
       }
     }
 
+    async function updateClientVisibility(action) {
+      try {
+        const response = await fetch("/dashboard/api/clients/" + encodeURIComponent(state.selectedClientId) + "/" + action, {
+          method: "POST"
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Could not update chat");
+        state.flash = { type: "ok", message: payload.message || "Chat updated." };
+        await refreshAll();
+      } catch (error) {
+        state.flash = { type: "error", message: error.message || "Could not update chat." };
+        renderDetail(state.selectedClient, state.selectedDetail, (state.selectedDetail && state.selectedDetail.messages) || []);
+      }
+    }
+
     function cycleQueue(predicate) {
       const queue = getFilteredClients().filter(predicate);
       if (!queue.length) return;
@@ -1773,6 +1927,43 @@ function renderDashboardPage() {
       refreshAll().catch((error) => {
         console.error(error);
       });
+    });
+
+    editorModeBtnEl.addEventListener("click", () => {
+      state.editorMode = !state.editorMode;
+      document.body.classList.toggle("editor-mode", state.editorMode);
+      editorModeBtnEl.textContent = "Editor mode: " + (state.editorMode ? "On" : "Off");
+    });
+
+    startConversationFormEl.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const phone = startConversationPhoneEl.value.trim();
+      const body = startConversationBodyEl.value.trim();
+      if (!phone || !body) {
+        startConversationFlashEl.textContent = "Captura numero y mensaje inicial antes de enviar.";
+        return;
+      }
+
+      try {
+        startConversationFlashEl.textContent = "Enviando mensaje inicial...";
+        const response = await fetch("/dashboard/api/conversations/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone, body })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Could not start conversation");
+        startConversationPhoneEl.value = "";
+        startConversationBodyEl.value = "";
+        startConversationFlashEl.textContent = "Mensaje inicial enviado.";
+        state.flash = { type: "ok", message: payload.message || "Conversation started." };
+        state.selectedClientId = payload.waId;
+        await refreshAll();
+      } catch (error) {
+        startConversationFlashEl.textContent = error.message || "No se pudo enviar el mensaje inicial.";
+        state.flash = { type: "error", message: error.message || "Could not start conversation." };
+        renderDetail(state.selectedClient, state.selectedDetail, (state.selectedDetail && state.selectedDetail.messages) || []);
+      }
     });
 
     compactPdfBtnEl.addEventListener("click", () => {
@@ -1918,12 +2109,14 @@ function renderErpPage() {
       document.querySelectorAll(".approve-btn").forEach((button) => button.addEventListener("click", approveLoan));
     }
     function renderLoans() {
-      const rows = state.loans.map((loan) => '<tr><td><strong>' + esc(displayName(loan)) + '</strong><br><span class="muted">' + esc(loan.wa_id) + '</span></td><td>' + money(loan.principal_cents, loan.currency) + '<br><span class="muted">Total ' + money(loan.total_payable_cents, loan.currency) + '</span></td><td>' + money(loan.amount_paid_cents, loan.currency) + '<br><span class="muted">Saldo ' + money(loan.balance_cents, loan.currency) + '</span></td><td>' + esc(loan.next_due_date || "-") + '</td><td>' + (loan.overdue_count ? '<span class="pill bad">' + esc(loan.overdue_count) + ' vencidas</span>' : '<span class="pill good">Al corriente</span>') + '</td><td>' + esc(loan.conekta_spei_clabe || "-") + '<br><span class="muted">' + esc(loan.conekta_spei_bank || "") + '</span></td></tr>').join("");
-      document.getElementById("loansTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Prestamo</th><th>Pagado</th><th>Proximo pago</th><th>Estado</th><th>CLABE</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">Todavia no hay prestamos activos.</div>';
+      const rows = state.loans.map((loan) => '<tr><td><strong>' + esc(displayName(loan)) + '</strong><br><span class="muted">' + esc(loan.wa_id) + '</span></td><td>' + money(loan.principal_cents, loan.currency) + '<br><span class="muted">Total ' + money(loan.total_payable_cents, loan.currency) + '</span></td><td>' + money(loan.amount_paid_cents, loan.currency) + '<br><span class="muted">Saldo ' + money(loan.balance_cents, loan.currency) + '</span></td><td>' + esc(loan.next_due_date || "-") + '</td><td>' + (loan.overdue_count ? '<span class="pill bad">' + esc(loan.overdue_count) + ' vencidas</span>' : '<span class="pill good">Al corriente</span>') + '</td><td>' + esc(loan.conekta_spei_clabe || "-") + '<br><span class="muted">' + esc(loan.conekta_spei_bank || "") + '</span></td><td><button class="btn edit-loan-btn" type="button" data-loan-id="' + esc(loan.id) + '">Editar</button></td></tr>').join("");
+      document.getElementById("loansTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Prestamo</th><th>Pagado</th><th>Proximo pago</th><th>Estado</th><th>CLABE</th><th>Accion</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">Todavia no hay prestamos activos.</div>';
+      document.querySelectorAll(".edit-loan-btn").forEach((button) => button.addEventListener("click", editLoan));
     }
     function renderPayments() {
-      const rows = state.payments.map((p) => '<tr><td><strong>' + esc(displayName(p)) + '</strong><br><span class="muted">' + esc(p.wa_id) + '</span></td><td>#' + esc(p.installment_number) + '</td><td>' + esc(p.due_date || "-") + '</td><td>' + money(p.amount_due_cents, p.currency) + '</td><td>' + money(p.amount_paid_cents, p.currency) + '</td><td>' + statusPill(p.status, p.due_date) + '</td><td>' + esc(p.provider_order_id || "-") + '</td></tr>').join("");
-      document.getElementById("paymentsTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Cuota</th><th>Vence</th><th>Monto</th><th>Pagado</th><th>Estado</th><th>Orden</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">Sin calendario de pagos.</div>';
+      const rows = state.payments.map((p) => '<tr><td><strong>' + esc(displayName(p)) + '</strong><br><span class="muted">' + esc(p.wa_id) + '</span></td><td>#' + esc(p.installment_number) + '</td><td>' + esc(p.due_date || "-") + '</td><td>' + money(p.amount_due_cents, p.currency) + '</td><td>' + money(p.amount_paid_cents, p.currency) + '</td><td>' + statusPill(p.status, p.due_date) + '</td><td>' + esc(p.provider_order_id || "-") + '</td><td><button class="btn edit-payment-btn" type="button" data-installment-id="' + esc(p.id) + '">Editar</button></td></tr>').join("");
+      document.getElementById("paymentsTable").innerHTML = rows ? '<table><thead><tr><th>Cliente</th><th>Cuota</th><th>Vence</th><th>Monto</th><th>Pagado</th><th>Estado</th><th>Orden</th><th>Accion</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="empty">Sin calendario de pagos.</div>';
+      document.querySelectorAll(".edit-payment-btn").forEach((button) => button.addEventListener("click", editPayment));
     }
     async function refresh() {
       showFlash("", "");
@@ -1954,6 +2147,50 @@ function renderErpPage() {
         showFlash("error", error.message || "No se pudo aprobar el prestamo.");
       } finally {
         button.disabled = false;
+      }
+    }
+
+    async function editLoan(event) {
+      const loan = state.loans.find((item) => String(item.id) === String(event.currentTarget.dataset.loanId));
+      if (!loan) return;
+      const status = prompt("Estado del prestamo", loan.status || "active");
+      if (status === null) return;
+      const notes = prompt("Notas", loan.notes || "");
+      if (notes === null) return;
+      try {
+        const response = await fetch("/erp/api/loans/" + encodeURIComponent(loan.id), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status, notes })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "No se pudo editar");
+        showFlash("ok", "Prestamo actualizado.");
+        await refresh();
+      } catch (error) {
+        showFlash("error", error.message || "No se pudo editar el prestamo.");
+      }
+    }
+
+    async function editPayment(event) {
+      const payment = state.payments.find((item) => String(item.id) === String(event.currentTarget.dataset.installmentId));
+      if (!payment) return;
+      const dueDate = prompt("Fecha de vencimiento YYYY-MM-DD", payment.due_date || "");
+      if (dueDate === null) return;
+      const status = prompt("Estado de cuota", payment.status || "pending");
+      if (status === null) return;
+      try {
+        const response = await fetch("/erp/api/installments/" + encodeURIComponent(payment.id), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dueDate, status })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "No se pudo editar");
+        showFlash("ok", "Cuota actualizada.");
+        await refresh();
+      } catch (error) {
+        showFlash("error", error.message || "No se pudo editar la cuota.");
       }
     }
     document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => {
@@ -2400,6 +2637,22 @@ app.post("/erp/api/clients/:waId/approve-loan", async (req, res) => {
     const refreshedLoanDetail = await getLoanDetail(loan.id);
     const firstOrder = orderResults[0] || {};
 
+    if (conektaWarning && orderResults.length === 0) {
+      await updateLoanEditableFields(loan.id, { status: "setup_failed", notes: `Conekta setup failed: ${conektaWarning.message || "unknown error"}` });
+      await updateClient(client.wa_id, {
+        stage: "under_review",
+        status: "under_review",
+        archived_at: null,
+        deleted_at: null
+      });
+
+      return res.status(502).json({
+        ok: false,
+        warning: conektaWarning,
+        error: `Conekta no pudo generar la CLABE/ordenes: ${conektaWarning.message || "error desconocido"}. El expediente queda listo para reintentar.`
+      });
+    }
+
     if (firstOrder.clabe) {
       await sendTextMessage(
         client.wa_id,
@@ -2425,6 +2678,52 @@ app.post("/erp/api/clients/:waId/approve-loan", async (req, res) => {
   } catch (error) {
     console.error("ERP approve loan error:", error);
     return res.status(500).json({ error: error.message || "Failed to approve loan" });
+  }
+});
+
+app.patch("/erp/api/loans/:loanId", async (req, res) => {
+  try {
+    const updates = {};
+    if (req.body?.status !== undefined) updates.status = String(req.body.status || "").trim();
+    if (req.body?.notes !== undefined) updates.notes = String(req.body.notes || "").trim() || null;
+    if (req.body?.principal !== undefined) updates.principal_cents = parseAmountToCents(req.body.principal);
+    if (req.body?.totalPayable !== undefined) updates.total_payable_cents = parseAmountToCents(req.body.totalPayable);
+    if (req.body?.weeklyPayment !== undefined) updates.weekly_payment_cents = parseAmountToCents(req.body.weeklyPayment);
+    if (req.body?.termWeeks !== undefined) updates.term_weeks = Number.parseInt(req.body.termWeeks, 10);
+    if (req.body?.disbursementDate !== undefined) updates.disbursement_date = String(req.body.disbursementDate || "").trim() || null;
+    if (req.body?.firstDueDate !== undefined) updates.first_due_date = String(req.body.firstDueDate || "").trim() || null;
+
+    Object.keys(updates).forEach((key) => {
+      if (updates[key] === null || updates[key] === "" || Number.isNaN(updates[key])) delete updates[key];
+    });
+
+    const detail = await updateLoanEditableFields(req.params.loanId, updates);
+    if (!detail) return res.status(404).json({ error: "Loan not found" });
+    return res.json({ ok: true, loan: detail.loan, schedule: detail.schedule });
+  } catch (error) {
+    console.error("ERP edit loan error:", error);
+    return res.status(500).json({ error: "Failed to update loan" });
+  }
+});
+
+app.patch("/erp/api/installments/:installmentId", async (req, res) => {
+  try {
+    const updates = {};
+    if (req.body?.dueDate !== undefined) updates.due_date = String(req.body.dueDate || "").trim();
+    if (req.body?.status !== undefined) updates.status = String(req.body.status || "").trim();
+    if (req.body?.amountDue !== undefined) updates.amount_due_cents = parseAmountToCents(req.body.amountDue);
+    if (req.body?.amountPaid !== undefined) updates.amount_paid_cents = parseAmountToCents(req.body.amountPaid) || 0;
+
+    Object.keys(updates).forEach((key) => {
+      if (updates[key] === null || updates[key] === "" || Number.isNaN(updates[key])) delete updates[key];
+    });
+
+    const installment = await updateInstallmentEditableFields(req.params.installmentId, updates);
+    if (!installment) return res.status(404).json({ error: "Installment not found" });
+    return res.json({ ok: true, installment });
+  } catch (error) {
+    console.error("ERP edit installment error:", error);
+    return res.status(500).json({ error: "Failed to update installment" });
   }
 });
 
@@ -2493,7 +2792,10 @@ app.get("/dashboard/clients/:waId/compact-card.pdf", async (req, res) => {
 app.get("/dashboard/api/clients", async (req, res) => {
   try {
     const clients = await getClientsWithLastMessage();
-    res.json({ clients });
+    const includeArchived = req.query.includeArchived === "1" || req.query.includeArchived === "true";
+    res.json({
+      clients: includeArchived ? clients : clients.filter((client) => !client.archived_at)
+    });
   } catch (error) {
     console.error("Dashboard clients error:", error);
     res.status(500).json({ error: "Failed to load clients" });
@@ -2662,6 +2964,69 @@ app.get("/dashboard/file", async (req, res) => {
   } catch (error) {
     console.error("Dashboard file error:", error);
     return res.status(500).send("Failed to load file");
+  }
+});
+
+app.post("/dashboard/api/conversations/start", async (req, res) => {
+  try {
+    const waId = normalizeWaId(req.body?.phone);
+    const body = String(req.body?.body || "").trim();
+
+    if (!waId) {
+      return res.status(400).json({ error: "Valid WhatsApp number is required" });
+    }
+
+    if (!body) {
+      return res.status(400).json({ error: "Message body is required" });
+    }
+
+    await createOrRestoreClient(waId, req.body?.profileName || null);
+    await sendTextMessage(waId, body);
+
+    return res.json({
+      ok: true,
+      waId,
+      message: "Conversation started and message sent."
+    });
+  } catch (error) {
+    console.error("Dashboard start conversation error:", error.response?.data || error.message || error);
+    return res.status(500).json({ error: "Failed to start conversation" });
+  }
+});
+
+app.post("/dashboard/api/clients/:waId/archive", async (req, res) => {
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    await archiveClient(client.wa_id);
+    return res.json({ ok: true, message: "Chat archived." });
+  } catch (error) {
+    console.error("Archive client error:", error);
+    return res.status(500).json({ error: "Failed to archive chat" });
+  }
+});
+
+app.post("/dashboard/api/clients/:waId/unarchive", async (req, res) => {
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    await unarchiveClient(client.wa_id);
+    return res.json({ ok: true, message: "Chat unarchived." });
+  } catch (error) {
+    console.error("Unarchive client error:", error);
+    return res.status(500).json({ error: "Failed to unarchive chat" });
+  }
+});
+
+app.post("/dashboard/api/clients/:waId/delete", async (req, res) => {
+  try {
+    const client = await getClient(req.params.waId);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    await softDeleteClient(client.wa_id);
+    return res.json({ ok: true, message: "Chat removed from dashboard." });
+  } catch (error) {
+    console.error("Delete client error:", error);
+    return res.status(500).json({ error: "Failed to delete chat" });
   }
 });
 

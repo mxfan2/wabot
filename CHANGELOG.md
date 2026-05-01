@@ -400,3 +400,81 @@
 - Updated `.env` `BASE_URL` to `https://wabot.kvlaurb.com`.
 - Restarted the Wabot process on port `3001`.
 - Re-ran `npm run test:webhook` successfully after the public domain change.
+
+## 2026-04-30 - Dashboard Editor, New Conversation Start, ERP Edit Hooks, and Conekta Test Cleanup by CODEX
+- Created a backup snapshot in `backups/20260430-171801/` before modifying dashboard/ERP code and cleaning the SQLite data.
+- Added soft archive/delete support for dashboard chats with new `clients` fields:
+  - `archived_at`
+  - `deleted_at`
+- Added dashboard editor mode toggle:
+  - normal mode hides archived/deleted chats,
+  - editor mode can show archived chats and exposes archive/unarchive/delete actions.
+- Added a dashboard "Start chat" form so an advisor can initiate a WhatsApp conversation with a number that does not yet exist in the dashboard.
+- Added API routes:
+  - `POST /dashboard/api/conversations/start`
+  - `POST /dashboard/api/clients/:waId/archive`
+  - `POST /dashboard/api/clients/:waId/unarchive`
+  - `POST /dashboard/api/clients/:waId/delete`
+- Added ERP edit endpoints and UI buttons for basic edits:
+  - `PATCH /erp/api/loans/:loanId`
+  - `PATCH /erp/api/installments/:installmentId`
+- Cleaned Conekta test/noise data from the local database:
+  - deleted 38 ignored/unmatched Conekta transaction audit rows,
+  - deleted 1 standalone `test-route-conekta-*` payment order,
+  - kept ERP-linked loans, schedules, and Conekta orders intact.
+- Verified:
+  - `node --check database.js`
+  - `node --check server.js`
+  - `npm run test:webhook`
+  - local dashboard API returns `200`,
+  - local and public ERP overview return `200`,
+  - ERP unmatched Conekta count is now `0`.
+
+## 2026-04-30 - Dashboard Follow-Up Draft Button by CODEX
+- Added a dashboard `Draft follow-up` button in the manual outreach panel.
+- The button does not send WhatsApp messages automatically.
+- It fills the custom message textarea with a reviewable follow-up draft based on the client state:
+  - incomplete questionnaire,
+  - pending documentation,
+  - under review,
+  - generic follow-up fallback.
+- Follow-up drafts ask whether the client has questions or wants to speak with an advisor.
+- Verified:
+  - `node --check server.js`
+  - `node --check database.js`
+  - `npm run test:webhook`
+
+## 2026-04-30 - New Client Initial Message Button by CODEX
+- Renamed the new-conversation dashboard action to `Enviar mensaje inicial` so the button is explicit for clients not yet in the dashboard.
+- Added inline status text for the new client message form:
+  - prompts for missing phone/message,
+  - shows sending state,
+  - confirms successful send,
+  - shows send errors.
+- Verified:
+  - `node --check server.js`
+  - `node --check database.js`
+  - `BASE_URL=http://127.0.0.1:3001 npm run test:webhook`
+- Note: the default public `BASE_URL` webhook test hit a temporary timeout through the public domain/hairpin path, so the functional webhook route was verified locally.
+
+## 2026-05-01 - Dashboard Visibility and ERP Approval Failure Fix by CODEX
+- Fixed a dashboard visibility regression where a chat previously soft-deleted/archived stayed hidden even after the client sent new WhatsApp messages and the bot responded.
+- Updated `createClientIfNotExists()` so inbound activity restores `archived_at` and `deleted_at` while preserving the existing workflow stage/status.
+- Added Conekta name/description sanitization so applicant names with unsupported characters, such as brackets or emoji, do not cause Conekta `Invalid format for "name"` errors.
+- Updated ERP approval handling so if Conekta fails before any payment orders are created:
+  - the loan is marked `setup_failed`,
+  - the client is restored to `under_review`,
+  - the approval endpoint returns an error instead of silently leaving an active loan without CLABE.
+- Repaired the affected test/client record `5216441557322`:
+  - cleared `archived_at` and `deleted_at`,
+  - returned it to dashboard visibility,
+  - marked the failed loan `#3` as `setup_failed`,
+  - cancelled its generated schedule rows.
+- Verified:
+  - `node --check database.js`
+  - `node --check server.js`
+  - `node --check conekta.js`
+  - `BASE_URL=http://127.0.0.1:3001 npm run test:webhook`
+  - dashboard API includes `5216441557322`,
+  - ERP approval queue includes `5216441557322`,
+  - active loan summary excludes the setup-failed loan.

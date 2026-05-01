@@ -29,6 +29,17 @@ function normalizeEmail(email) {
   return clean.includes("@") ? clean : CONFIG.CONEKTA_DEFAULT_EMAIL;
 }
 
+function normalizeName(name, fallback = "Cliente Wabot") {
+  const clean = String(name || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9 .'-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return (clean || fallback).slice(0, 120);
+}
+
 function extractPrimaryCharge(order = {}) {
   const charges = order.charges?.data || order.charges || [];
   return Array.isArray(charges) ? charges[0] : null;
@@ -73,7 +84,7 @@ async function createCustomer({ waId, name, email, phone }) {
   const response = await axios.post(
     `${CONFIG.CONEKTA_API_BASE_URL}/customers`,
     {
-      name: String(name || waId || "Cliente Wabot").slice(0, 120),
+      name: normalizeName(name || waId),
       email: normalizeEmail(email),
       phone: normalizePhone(phone),
       metadata: {
@@ -129,14 +140,14 @@ async function createSpeiOrder({
 
   const body = {
     currency: "MXN",
-    customer_info: {
-      name: String(name || waId || "Cliente Wabot").slice(0, 120),
+      customer_info: {
+      name: normalizeName(name || waId),
       email: normalizeEmail(email),
       phone: normalizePhone(phone)
     },
     line_items: [
       {
-        name: String(description || "Pago semanal").slice(0, 120),
+        name: normalizeName(description, "Pago semanal"),
         unit_price: amount,
         quantity: 1
       }
@@ -193,7 +204,7 @@ async function createReusableClabeOrder({
     },
     line_items: [
       {
-        name: String(description || "Pago semanal").slice(0, 120),
+        name: normalizeName(description, "Pago semanal"),
         unit_price: amount,
         quantity: 1
       }

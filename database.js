@@ -109,7 +109,9 @@ db.all(`PRAGMA table_info(clients)`, (err, rows) => {
     { name: "conekta_customer_id", sql: "TEXT" },
     { name: "conekta_spei_source_id", sql: "TEXT" },
     { name: "conekta_spei_clabe", sql: "TEXT" },
-    { name: "conekta_spei_bank", sql: "TEXT" }
+    { name: "conekta_spei_bank", sql: "TEXT" },
+    { name: "archived_at", sql: "DATETIME" },
+    { name: "deleted_at", sql: "DATETIME" }
   ];
 
   for (const column of expectedColumns) {
@@ -220,6 +222,8 @@ function getClientsWithLastMessage() {
         c.house_front_path,
         c.income_proof_path,
         c.advisor_notified,
+        c.archived_at,
+        c.deleted_at,
         c.updated_at,
         last_message.message_type AS last_message_type,
         last_message.message_text AS last_message_text,
@@ -238,11 +242,31 @@ function getClientsWithLastMessage() {
          AND latest.max_id = m1.id
       ) last_message
         ON last_message.wa_id = c.wa_id
+      WHERE c.deleted_at IS NULL
       ORDER BY COALESCE(last_message.created_at, c.updated_at, c.created_at) DESC, c.id DESC`,
       [],
       (err, rows) => {
         if (err) reject(err);
         else resolve(rows);
+      }
+    );
+  });
+}
+
+function createOrRestoreClient(wa_id, profile_name = null) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO clients (wa_id, profile_name, stage, question_step, status, archived_at, deleted_at)
+       VALUES (?, ?, 'stage_1', NULL, 'active', NULL, NULL)
+       ON CONFLICT(wa_id) DO UPDATE SET
+         profile_name = COALESCE(excluded.profile_name, clients.profile_name),
+         archived_at = NULL,
+         deleted_at = NULL,
+         updated_at = CURRENT_TIMESTAMP`,
+      [wa_id, profile_name],
+      function (err) {
+        if (err) reject(err);
+        else resolve(true);
       }
     );
   });
@@ -276,8 +300,13 @@ function getMessagesByClient(wa_id) {
 function createClientIfNotExists(wa_id, profile_name = null) {
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT OR IGNORE INTO clients (wa_id, profile_name, stage, question_step, status)
-       VALUES (?, ?, 'stage_1', NULL, 'active')`,
+      `INSERT INTO clients (wa_id, profile_name, stage, question_step, status, archived_at, deleted_at)
+       VALUES (?, ?, 'stage_1', NULL, 'active', NULL, NULL)
+       ON CONFLICT(wa_id) DO UPDATE SET
+         profile_name = COALESCE(excluded.profile_name, clients.profile_name),
+         archived_at = NULL,
+         deleted_at = NULL,
+         updated_at = CURRENT_TIMESTAMP`,
       [wa_id, profile_name],
       function (err) {
         if (err) reject(err);
@@ -305,6 +334,28 @@ function updateClient(wa_id, updates) {
         else resolve(true);
       }
     );
+  });
+}
+
+function archiveClient(wa_id) {
+  return updateClient(wa_id, {
+    archived_at: new Date().toISOString(),
+    status: "archived"
+  });
+}
+
+function unarchiveClient(wa_id) {
+  return updateClient(wa_id, {
+    archived_at: null,
+    status: "active"
+  });
+}
+
+function softDeleteClient(wa_id) {
+  return updateClient(wa_id, {
+    deleted_at: new Date().toISOString(),
+    archived_at: new Date().toISOString(),
+    status: "deleted"
   });
 }
 
@@ -505,6 +556,44 @@ async function getActiveLoanByWaId(waId) {
      LIMIT 1`,
     [waId]
   );
+}
+
+async function updateLoanEditableFields(loanId, updates = {}) {
+  const allowed = [
+    "principal_cents",
+    "total_payable_cents",
+    "weekly_payment_cents",
+    "term_weeks",
+    "amount_paid_cents",
+    "status",
+    "disbursement_date",
+    "first_due_date",
+    "notes"
+  ];
+  const keys = allowed.filter((key) => Object.prototype.hasOwnProperty.call(updates, key));
+  if (!keys.length) return getLoanDetail(loanId);
+
+  const setClause = keys.map((key) => `${key} = ?`).join(", ");
+  await runQuery(
+    `UPDATE loans SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [...keys.map((key) => updates[key]), loanId]
+  );
+  return getLoanDetail(loanId);
+}
+
+async function updateInstallmentEditableFields(installmentId, updates = {}) {
+  const allowed = ["due_date", "amount_due_cents", "amount_paid_cents", "status", "paid_at"];
+  const keys = allowed.filter((key) => Object.prototype.hasOwnProperty.call(updates, key));
+  if (!keys.length) {
+    return getQuery(`SELECT * FROM payment_schedule WHERE id = ?`, [installmentId]);
+  }
+
+  const setClause = keys.map((key) => `${key} = ?`).join(", ");
+  await runQuery(
+    `UPDATE payment_schedule SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [...keys.map((key) => updates[key]), installmentId]
+  );
+  return getQuery(`SELECT * FROM payment_schedule WHERE id = ?`, [installmentId]);
 }
 
 async function updateLoanConektaInfo(loanId, updates) {
@@ -830,8 +919,12 @@ module.exports = {
   getClient,
   getClientsWithLastMessage,
   getMessagesByClient,
+  createOrRestoreClient,
   createClientIfNotExists,
   updateClient,
+  archiveClient,
+  unarchiveClient,
+  softDeleteClient,
   discardClientApplication,
   saveMessage,
   resetToStage1,
@@ -842,6 +935,8 @@ module.exports = {
   createLoanWithSchedule,
   getLoanDetail,
   getActiveLoanByWaId,
+  updateLoanEditableFields,
+  updateInstallmentEditableFields,
   updateLoanConektaInfo,
   linkInstallmentPaymentOrder,
   listErpEligibleClients,
