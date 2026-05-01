@@ -97,3 +97,8 @@ credentials.json
 *.pem
 *.key
 .credentials
+wabot/desktop/dist/win-unpacked/Wabot
+Admin.exe
+wabot/desktop/dist/Wabot-Admin-Windows-x64-portable.zip
+wabot/desktop/node_modules/electron/dist/electron
+frontend/public/downloads/Wabot-Admin-Windows-x64-portable.zip
