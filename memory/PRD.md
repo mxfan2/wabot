@@ -58,20 +58,27 @@ aiOperator.js → Claude Sonnet 4.5 vía https://integrations.emergentagent.com/
 - WhatsApp: Cloud API v23.0
 - Pagos (opcional): Conekta SPEI
 
-## P0 / P1 / P2 backlog (Fase 2)
+## P0 / P1 / P2 backlog (Fase 3)
+
+### Done in Fase 2
+- ✅ ERP en React: Resumen ejecutivo (saldo activo, vencidos, vence hoy, por aprobar, no conciliados) + tabs Listos para préstamo / Préstamos / Cuotas. Aprobación de préstamo con form (capital, pago semanal, plazo, primer venc.). Cobranza Conekta automática (cuando `CONEKTA_ENABLED=true`). Marcar cuota pagada manualmente. Editar notas de préstamo.
+- ✅ WebSocket en vivo (Socket.IO): la sidebar y el detalle se actualizan solos cuando entra mensaje o cambia un cliente. Indicador `● Live` con pulso verde.
+- ✅ PWA instalable: `manifest.webmanifest`, `sw.js` (network-first SPA, cache-first assets, no-cache APIs), íconos 192/512.
+- ✅ Capacitor scaffolding (`capacitor.config.json`) + `ANDROID.md` con guía paso a paso para empaquetar como APK Android usando Android Studio en Windows. Caso de uso: asesor en calle.
 
 ### P0 (siguiente sesión)
-- ERP completo en React (préstamos activos, calendario semanal, cobros Conekta) — endpoints `/erp/api/*` ya existen, solo falta UI.
-- Compact PDF del expediente desde la nueva UI (existe endpoint `/dashboard/clients/:waId/compact-card.pdf`).
-
-### P1
+- Compact PDF del expediente desde la nueva UI (botón ya existe en tab "Listos para préstamo", abre el endpoint legacy — verificar que `?token=` en query funcione bien con `requireAuth`).
 - Multiusuario admin con roles (asesor / supervisor) — hoy es 1 admin del .env.
 - Métricas: % calificación completada, tiempo promedio de respuesta, score promedio.
-- Subir documentos manualmente desde el dashboard.
+
+### P1
+- Captura nativa de fotos en la app Android (Capacitor Camera) para que el asesor suba INE/comprobantes en sitio.
+- FCM push notifications para asesores cuando llega un lead nuevo.
+- Subir documentos manualmente desde el dashboard (drag & drop).
 
 ### P2
 - Migración a PostgreSQL (si crece el volumen).
-- Modo en vivo (WebSocket) para que el dashboard se actualice sin refresh cuando llegan mensajes nuevos.
+- Login biométrico en Android.
 - Auditoría / log de acciones de admin.
 
 ## Files of note
