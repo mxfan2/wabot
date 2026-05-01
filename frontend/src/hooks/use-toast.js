@@ -37,56 +37,43 @@ const addToRemoveQueue = (toastId) => {
   toastTimeouts.set(toastId, timeout)
 }
 
+function applyDismiss(state, toastId) {
+  if (toastId) {
+    addToRemoveQueue(toastId)
+  } else {
+    state.toasts.forEach((toast) => addToRemoveQueue(toast.id))
+  }
+  return {
+    ...state,
+    toasts: state.toasts.map((t) =>
+      t.id === toastId || toastId === undefined ? { ...t, open: false } : t),
+  }
+}
+
+function applyRemove(state, toastId) {
+  if (toastId === undefined) return { ...state, toasts: [] }
+  return { ...state, toasts: state.toasts.filter((t) => t.id !== toastId) }
+}
+
 export const reducer = (state, action) => {
   switch (action.type) {
     case "ADD_TOAST":
       return {
         ...state,
         toasts: [action.toast, ...state.toasts].slice(0, TOAST_LIMIT),
-      };
-
+      }
     case "UPDATE_TOAST":
       return {
         ...state,
         toasts: state.toasts.map((t) =>
           t.id === action.toast.id ? { ...t, ...action.toast } : t),
-      };
-
-    case "DISMISS_TOAST": {
-      const { toastId } = action
-
-      // ! Side effects ! - This could be extracted into a dismissToast() action,
-      // but I'll keep it here for simplicity
-      if (toastId) {
-        addToRemoveQueue(toastId)
-      } else {
-        state.toasts.forEach((toast) => {
-          addToRemoveQueue(toast.id)
-        })
       }
-
-      return {
-        ...state,
-        toasts: state.toasts.map((t) =>
-          t.id === toastId || toastId === undefined
-            ? {
-                ...t,
-                open: false,
-              }
-            : t),
-      };
-    }
+    case "DISMISS_TOAST":
+      return applyDismiss(state, action.toastId)
     case "REMOVE_TOAST":
-      if (action.toastId === undefined) {
-        return {
-          ...state,
-          toasts: [],
-        }
-      }
-      return {
-        ...state,
-        toasts: state.toasts.filter((t) => t.id !== action.toastId),
-      };
+      return applyRemove(state, action.toastId)
+    default:
+      return state
   }
 }
 
@@ -143,6 +130,8 @@ function useToast() {
         listeners.splice(index, 1)
       }
     };
+    // listeners is a module-scoped mutable ref, not reactive; setState is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state])
 
   return {
